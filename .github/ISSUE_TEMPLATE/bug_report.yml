@@ -1,0 +1,30 @@
+name: Bug report
+description: Something doesn't work as expected
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, what you got. Use synthetic data only, never real amounts or account ids.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      render: shell
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: MoneyFlow version
+      placeholder: "0.1.0"
+    validations:
+      required: true
+  - type: input
+    id: env
+    attributes:
+      label: Python and Postgres versions
+      placeholder: "Python 3.12, Postgres 16"
