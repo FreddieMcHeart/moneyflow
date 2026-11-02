@@ -216,3 +216,15 @@ def test_reimport_is_idempotent_and_keeps_non_import_rows(conn, tmp_path):
     assert first == {"accounts": 1, "transactions": 2, "rules": 1, "rulings": 2, "categories": 2}
     assert second == {**first, "rulings": 3}
     assert {r.id for r in db.load_inputs(conn).rulings} == {"override:t1", "override:t2", "op1"}
+
+
+def test_stored_transaction_gone_from_source_is_reported_not_deleted(conn, tmp_path, capsys):
+    repo = _db_repo(tmp_path)
+    run(repo, conn)
+    (repo / "data" / "monobank_import" / "acc1_2026-01-01_2026-01-31.csv").write_text(_csv(_row("t1")))
+    capsys.readouterr()
+    counts = run(repo, conn)
+    out = capsys.readouterr().out
+    assert "not in source: 1 stored transactions\n  t2\n" in out
+    assert counts["transactions"] == 2
+    assert [t.id for t in db.load_inputs(conn).transactions] == ["t1", "t2"]
