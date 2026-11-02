@@ -69,6 +69,19 @@ def test_replace_imported_keeps_operator_rows(conn):
     assert [r.id for r in db.load_inputs(conn).rulings] == ["op1"]
 
 
+def test_replace_imported_keeps_operator_rules_and_categories(conn):
+    _write(conn, rules=(_import_rule("r1"),), categories=("food",))
+    conn.execute(
+        "insert into rules (id, kind, priority, ordinal, match, result, active, created_by)"
+        " select 'oprule', kind, priority, ordinal, match, result, active, 'operator' from rules where id = 'r1'"
+    )
+    conn.execute("insert into categories (name, created_by) values ('opcat', 'operator')")
+    _write(conn, rules=(_import_rule("r2"),), categories=("misc",))
+    got = db.load_inputs(conn)
+    assert {r.id for r in got.rules} == {"oprule", "r2"}
+    assert got.categories == frozenset({"opcat", "misc"})
+
+
 def test_negative_amount_rejected_by_db(conn):
     bad = replace(tx("t1"), amount=Decimal("-1.00"))
     with pytest.raises(psycopg.errors.CheckViolation):
