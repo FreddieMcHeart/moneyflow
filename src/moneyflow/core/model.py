@@ -1,0 +1,86 @@
+"""Core data model: frozen dataclasses, every field required, no defaults."""
+
+from collections.abc import Mapping
+from dataclasses import dataclass
+from datetime import date, datetime
+from decimal import Decimal
+from typing import Literal
+
+
+@dataclass(frozen=True)
+class Account:
+    id: str
+    name: str
+    currency: str
+    owner: str
+    role: str
+    include: bool
+
+
+@dataclass(frozen=True)
+class Transaction:
+    id: str
+    account_id: str
+    date: date
+    time: datetime
+    amount: Decimal  # positive, as in the bank export
+    currency: str
+    direction: Literal["income", "expense"]
+    mcc: int | None
+    description: str
+    comment: str
+
+
+@dataclass(frozen=True)
+class Rule:
+    id: str
+    kind: Literal["categorize"]
+    priority: int
+    ordinal: int  # position in the source file
+    match: Mapping[str, object]
+    result: Mapping[str, str | None]  # category, subcategory
+    active: bool
+    created_by: str
+
+
+@dataclass(frozen=True)
+class Ruling:
+    id: str
+    transaction_id: str
+    kind: Literal["category"]
+    payload: Mapping[str, str | None]  # category, subcategory, note
+    created_by: str
+
+
+@dataclass(frozen=True)
+class LedgerEntry:
+    transaction_id: str
+    part: int
+    date: date
+    account_id: str
+    category: str | None
+    subcategory: str | None
+    amount: Decimal  # signed: income +, expense -
+    currency: str
+    status: Literal["kept", "excluded", "unresolved"]
+    reason: str | None
+    decided_by: str | None
+
+
+@dataclass(frozen=True)
+class Inputs:
+    accounts: tuple[Account, ...]
+    transactions: tuple[Transaction, ...]
+    rules: tuple[Rule, ...]
+    rulings: tuple[Ruling, ...]
+    categories: frozenset[str]
+
+
+Ledger = tuple[LedgerEntry, ...]
+
+
+class BuildRefused(Exception):
+    def __init__(self, reason: str, transaction_id: str | None):
+        super().__init__(reason if transaction_id is None else f"{reason} (transaction {transaction_id})")
+        self.reason = reason
+        self.transaction_id = transaction_id
