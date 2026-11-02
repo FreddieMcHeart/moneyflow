@@ -53,6 +53,17 @@ def test_cli_exit_1_on_refusal(conn, db_url, capsys):
     assert db.load_ledger(conn) == ()
 
 
+def test_cli_exit_1_on_broken_rule_value(conn, db_url, capsys):
+    db.replace_imported(
+        conn, accounts=(account(),), transactions=(tx("t1"),),
+        rules=(replace(rule("r1", 10, 0, "food", None, amount_lt="abc"), created_by="import"),),
+        rulings=(), categories=("food",),
+    )
+    assert main(["rebuild", "--db", db_url]) == 1
+    err = capsys.readouterr().err
+    assert err.startswith("refused: rule r1") and "Traceback" not in err
+
+
 def test_cli_prints_counts(conn, db_url, capsys):
     _seed(conn)
     assert main(["rebuild", "--db", db_url]) == 0

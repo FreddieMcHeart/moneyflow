@@ -75,7 +75,28 @@ def test_excluded_entry_is_not_categorized():
     assert e.status == "excluded" and e.category is None
 
 
-def test_first_ruling_for_a_transaction_wins():
+def test_two_rulings_for_one_transaction_refuse():
     rulings = (ruling("g1", "t1", "food"), ruling("g2", "t1", "misc"))
-    e = _one(inputs(transactions=(tx(),), rulings=rulings))
-    assert (e.category, e.decided_by) == ("food", "ruling:g1")
+    with pytest.raises(BuildRefused, match="more than one ruling") as refused:
+        build(inputs(transactions=(tx(),), rulings=rulings))
+    assert refused.value.transaction_id == "t1"
+
+
+def test_ruling_on_excluded_entry_refuses():
+    from tests.core._builders import account
+
+    inp = inputs(transactions=(tx(),), rulings=(ruling("g1", "t1", "food"),), accounts=(account(include=False),))
+    with pytest.raises(BuildRefused, match="ruling on an excluded entry"):
+        build(inp)
+
+
+def test_broken_rule_value_refuses_naming_the_rule():
+    bad = rule("r9", 10, 0, "food", amount_lt="abc")
+    with pytest.raises(BuildRefused, match="rule r9") as refused:
+        build(inputs(transactions=(tx(),), rules=(bad,)))
+    assert refused.value.transaction_id == "t1"
+
+
+def test_empty_match_rule_refuses():
+    with pytest.raises(BuildRefused, match="rule r0: empty match"):
+        build(inputs(transactions=(tx(),), rules=(rule("r0", 10, 0, "food"),)))
