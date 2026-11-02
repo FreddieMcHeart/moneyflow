@@ -11,9 +11,10 @@ Decision = tuple[str, str | None, str]  # category, subcategory, decided_by
 def _ruling_decisions(inputs: Inputs) -> dict[str, Decision]:
     out: dict[str, Decision] = {}
     for ruling in inputs.rulings:
-        if ruling.transaction_id not in out:
-            category, subcategory = apply_ruling(ruling)
-            out[ruling.transaction_id] = (category, subcategory, f"ruling:{ruling.id}")
+        if ruling.transaction_id in out:
+            raise BuildRefused("more than one ruling", ruling.transaction_id)
+        category, subcategory = apply_ruling(ruling)
+        out[ruling.transaction_id] = (category, subcategory, f"ruling:{ruling.id}")
     return out
 
 
@@ -26,7 +27,10 @@ def _decide(tx: Transaction, rulings: dict[str, Decision], rules: list[Rule]) ->
     if tx.id in rulings:
         return rulings[tx.id]
     for rule in rules:
-        result = apply_rule(rule, tx)
+        try:
+            result = apply_rule(rule, tx)
+        except (ValueError, ArithmeticError) as broken:  # decimal.InvalidOperation is an ArithmeticError
+            raise BuildRefused(f"rule {rule.id}: {broken}", tx.id) from broken
         if result is not None:
             return result[0], result[1], f"rule:{rule.id}"
     return None
@@ -45,6 +49,8 @@ def categorize(entries: list[LedgerEntry], inputs: Inputs) -> list[LedgerEntry]:
     rules = _ordered_rules(inputs)
     out: list[LedgerEntry] = []
     for entry in entries:
+        if entry.status != "unresolved" and entry.transaction_id in rulings:
+            raise BuildRefused(f"ruling on an {entry.status} entry", entry.transaction_id)
         decision = _decide(txs[entry.transaction_id], rulings, rules) if entry.status == "unresolved" else None
         out.append(entry if decision is None else _apply(entry, decision, inputs))
     return out

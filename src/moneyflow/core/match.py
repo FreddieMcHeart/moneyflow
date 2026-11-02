@@ -46,6 +46,8 @@ _KEYS: dict[str, Callable[[object, Transaction], bool]] = {
 
 
 def matches(match: Mapping[str, object], tx: Transaction) -> bool:
+    if not match:
+        raise ValueError("empty match")
     for key in match:
         if key not in _KEYS:
             raise ValueError(f"unknown match key: {key}")

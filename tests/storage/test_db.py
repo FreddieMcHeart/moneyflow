@@ -86,3 +86,21 @@ def test_negative_amount_rejected_by_db(conn):
     bad = replace(tx("t1"), amount=Decimal("-1.00"))
     with pytest.raises(psycopg.errors.CheckViolation):
         _write(conn, transactions=(bad,))
+
+
+def test_load_inputs_reads_one_snapshot(conn, db_url, monkeypatch):
+    _write(conn, transactions=(tx("t1"),))
+    real_rows = db._rows
+    calls = []
+
+    def rows_then_concurrent_insert(c, query):
+        got = real_rows(c, query)
+        if not calls:
+            calls.append(query)  # before the insert: replace_imported below calls _rows too
+            with db.connect(db_url) as other:
+                db.replace_imported(other, accounts=(account(),), transactions=(tx("t1"), tx("t2")),
+                                    rules=(), rulings=(), categories=("food",))
+        return got
+
+    monkeypatch.setattr(db, "_rows", rows_then_concurrent_insert)
+    assert [t.id for t in db.load_inputs(conn).transactions] == ["t1"]

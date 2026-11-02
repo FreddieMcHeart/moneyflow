@@ -63,16 +63,26 @@ def _rows(conn: psycopg.Connection, query: str) -> list[dict]:
 
 
 def load_inputs(conn: psycopg.Connection) -> Inputs:
-    """Everything the core needs; only active rules."""
-    return Inputs(
-        accounts=tuple(_account(r) for r in _rows(conn, "select * from accounts order by id")),
-        transactions=tuple(_transaction(r) for r in _rows(conn, "select * from transactions order by id")),
-        rules=tuple(
-            _rule(r) for r in _rows(conn, "select * from rules where active order by priority, ordinal, id")
-        ),
-        rulings=tuple(_ruling(r) for r in _rows(conn, "select * from rulings order by id")),
-        categories=frozenset(r["name"] for r in _rows(conn, "select name from categories")),
-    )
+    """Everything the core needs, read from one snapshot; only active rules."""
+    with conn.transaction():
+        conn.execute("set transaction isolation level repeatable read")
+        return Inputs(
+            accounts=tuple(_account(r) for r in _rows(conn, "select * from accounts order by id")),
+            transactions=tuple(_transaction(r) for r in _rows(conn, "select * from transactions order by id")),
+            rules=tuple(
+                _rule(r) for r in _rows(conn, "select * from rules where active order by priority, ordinal, id")
+            ),
+            rulings=tuple(_ruling(r) for r in _rows(conn, "select * from rulings order by id")),
+            categories=frozenset(r["name"] for r in _rows(conn, "select name from categories")),
+        )
+
+
+def stale_transaction_ids(conn: psycopg.Connection, source_ids: Iterable[str]) -> list[str]:
+    """Stored transaction ids not in `source_ids`; reported by the import, never deleted."""
+    rows = conn.execute(
+        "select id from transactions where not (id = any(%s)) order by id", (list(source_ids),)
+    ).fetchall()
+    return [r["id"] for r in rows]  # type: ignore[index]
 
 
 def save_ledger(conn: psycopg.Connection, ledger: Ledger) -> None:
