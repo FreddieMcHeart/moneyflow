@@ -43,6 +43,8 @@ def test_refusal_saves_nothing(conn):
 
 def test_cli_exit_1_on_refusal(conn, db_url, capsys):
     _seed(conn)
+    prior = rebuild(conn)
+    assert prior
     conn.execute(
         "insert into rulings (id, transaction_id, kind, payload, created_by)"
         " values ('bad', 't1', 'category', '{\"category\": \"nope\"}', 'operator')"
@@ -50,7 +52,7 @@ def test_cli_exit_1_on_refusal(conn, db_url, capsys):
     assert main(["rebuild", "--db", db_url]) == 1
     err = capsys.readouterr().err
     assert "unknown category nope" in err and "t1" in err
-    assert db.load_ledger(conn) == ()
+    assert db.load_ledger(conn) == prior
 
 
 def test_cli_prints_counts(conn, db_url, capsys):

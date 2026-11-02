@@ -10,24 +10,25 @@ from tests.core._builders import account, tx
 D1, D2 = date(2026, 1, 1), date(2026, 1, 31)
 
 
-def _entry(tid, category, subcategory, amount, currency="UAH", day=1, status="kept"):
-    return LedgerEntry(tid, 0, date(2026, 1, day), "acc1", category, subcategory, Decimal(amount),
+def _entry(tid, category, subcategory, amount, currency="UAH", day=1, status="kept", account_id="acc1"):
+    return LedgerEntry(tid, 0, date(2026, 1, day), account_id, category, subcategory, Decimal(amount),
                        currency, status, None, "rule:r")
 
 
 def _seed(conn):
     db.replace_imported(
-        conn, accounts=(account(),),
+        conn, accounts=(account(), account("acc_usd", "USD")),
         transactions=(
             tx("t1", description="Latte Shop", day=2), tx("t2", description="bus", day=3),
-            tx("t3", description="x", day=4), tx("t4", description="50%_off", day=5),
+            tx("t3", description="x", day=4),
+            tx("t4", account_id="acc_usd", amount="1.00", currency="USD", description="50%_off", day=5),
         ),
         rules=(), rulings=(), categories=("Cafe", "Transport"),
     )
     conn.execute("update transactions set comment = 'Big COFFEE' where id = 't3'")
     ledger = (
         _entry("t1", "Cafe", "Coffee", "-10.50", day=2), _entry("t2", "Transport", None, "-3.00", day=3),
-        _entry("t3", "Cafe", None, "-4.25", day=4), _entry("t4", "Cafe", "Coffee", "-1.00", "USD", day=5),
+        _entry("t3", "Cafe", None, "-4.25", day=4), _entry("t4", "Cafe", "Coffee", "-1.00", "USD", day=5, account_id="acc_usd"),
     )
     db.save_ledger(conn, ledger)
     return ledger
