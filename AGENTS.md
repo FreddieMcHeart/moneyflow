@@ -18,12 +18,14 @@ The ub tools are read from `UB_TOOLS` (default `~/dev/ub-tools`) and are not par
 
 ## Local Postgres
 
-DB tests need a real Postgres. They fail (never skip) when `MONEYFLOW_TEST_DATABASE_URL` is unset.
+DB tests need a real Postgres. They fail (never skip) when `MONEYFLOW_TEST_DATABASE_URL` is unset,
+and they refuse a database whose name has no `test` (the fixture drops schema `public`).
 
 ```
 docker run -d --name mf-pg -e POSTGRES_PASSWORD=mf -p 5433:5432 postgres:16
+docker exec mf-pg createdb -U postgres moneyflow_test
 docker exec mf-pg createdb -U postgres moneyflow_dev
-export MONEYFLOW_TEST_DATABASE_URL=postgresql://postgres:mf@localhost:5433/postgres
+export MONEYFLOW_TEST_DATABASE_URL=postgresql://postgres:mf@localhost:5433/moneyflow_test
 export MONEYFLOW_DATABASE_URL=postgresql://postgres:mf@localhost:5433/moneyflow_dev
 ```
 
