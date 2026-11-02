@@ -1,0 +1,45 @@
+[importlinter]
+root_packages =
+    moneyflow
+include_external_packages = True
+
+[importlinter:contract:core-independent]
+name = core imports nothing outside itself and the stdlib
+type = forbidden
+source_modules =
+    moneyflow.core
+forbidden_modules =
+    moneyflow.services
+    moneyflow.storage
+    moneyflow.api
+    moneyflow.adapters
+    moneyflow.agent
+    tools
+    yaml
+    psycopg
+    sqlalchemy
+    alembic
+    mcp
+    pytest
+    pydantic
+    requests
+    httpx
+    numpy
+    pandas
+
+[importlinter:contract:services-not-api-agent]
+name = services must not import api or agent
+type = forbidden
+source_modules =
+    moneyflow.services
+forbidden_modules =
+    moneyflow.api
+    moneyflow.agent
+
+[importlinter:contract:src-not-tools]
+name = nothing under src imports tools
+type = forbidden
+source_modules =
+    moneyflow
+forbidden_modules =
+    tools

@@ -1,0 +1,39 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: mf
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      MONEYFLOW_TEST_DATABASE_URL: postgresql://postgres:mf@localhost:5432/postgres
+      UB_TOOLS: ${{ github.workspace }}/../ub-tools
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - name: Install Python 3.12
+        run: uv python install 3.12
+      - name: Fetch ub tools (crapper, dryer, mutator)
+        run: |
+          mkdir -p "$UB_TOOLS"
+          for tool in crapper dryer mutator; do
+            git clone --depth 1 "https://github.com/unclebob/$tool" "$UB_TOOLS/$tool"
+          done
+      - name: Sync dev environment
+        run: uv sync
+      - name: Quality gates
+        run: ./check.sh
