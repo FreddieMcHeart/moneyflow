@@ -1,0 +1,43 @@
+from decimal import Decimal
+
+import pytest
+
+from moneyflow.core.model import BuildRefused
+from moneyflow.core.stages.ingest import ingest
+from tests.core._builders import account, inputs, tx
+
+
+def test_unknown_account_refuses():
+    with pytest.raises(BuildRefused) as e:
+        ingest([], inputs(transactions=(tx(account_id="nope"),)))
+    assert e.value.transaction_id == "t1"
+
+
+def test_duplicate_transaction_refuses():
+    with pytest.raises(BuildRefused) as e:
+        ingest([], inputs(transactions=(tx("t1"), tx("t1"))))
+    assert e.value.transaction_id == "t1"
+
+
+def test_currency_mismatch_refuses():
+    with pytest.raises(BuildRefused) as e:
+        ingest([], inputs(transactions=(tx(currency="USD"),)))
+    assert e.value.transaction_id == "t1"
+
+
+def test_not_included_account_is_excluded():
+    inp = inputs(transactions=(tx(),), accounts=(account(include=False),))
+    (entry,) = ingest([], inp)
+    assert entry.status == "excluded"
+    assert entry.reason == "account-not-included"
+
+
+def test_ingest_shape():
+    (entry,) = ingest([], inputs(transactions=(tx(amount="12.50"),)))
+    assert entry.part == 0
+    assert entry.amount == Decimal("12.50")
+    assert entry.currency == "UAH"
+    assert entry.category is None and entry.subcategory is None
+    assert entry.decided_by is None and entry.reason is None
+    assert entry.status == "unresolved"
+    assert entry.account_id == "acc1"
