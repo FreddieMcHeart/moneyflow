@@ -1,9 +1,9 @@
 """DB fixtures: a real Postgres at MONEYFLOW_TEST_DATABASE_URL. Unset means FAIL, never skip."""
 
 import os
-from urllib.parse import urlparse
 
 import pytest
+from psycopg.conninfo import conninfo_to_dict
 
 from moneyflow.storage import db
 
@@ -11,10 +11,10 @@ _TABLES = "ledger_entries, rulings, rules, categories, transactions, accounts"
 
 
 def require_test_db(url: str) -> None:
-    """The fixture drops schema public: refuse any database whose name has no "test"."""
-    name = urlparse(url).path.lstrip("/")
-    if "test" not in name:
-        pytest.fail(f"refusing to drop schema public in database {name!r}: its name has no 'test'")
+    """The fixture drops schema public: refuse any database whose name does not end in "_test"."""
+    name = str(conninfo_to_dict(url).get("dbname", ""))
+    if not name.endswith("_test"):
+        pytest.fail(f"refusing to drop schema public in database {name!r}: its name does not end in '_test'")
 
 
 @pytest.fixture(scope="session")

@@ -26,8 +26,8 @@ def _accounts_yaml(*accounts: tuple[str, str, bool]) -> str:
     )
 
 
-def _row(tid: str, amount: str = "10.50", direction: str = "expense", day: int = 5) -> str:
-    return f"2026-01-{day:02d},2026-01-{day:02d}T12:00:00+02:00,{amount},UAH,{direction},5411,shop,note,,{tid}"
+def _row(tid: str, amount: str = "10.50", direction: str = "expense", day: int = 5, currency: str = "UAH") -> str:
+    return f"2026-01-{day:02d},2026-01-{day:02d}T12:00:00+02:00,{amount},{currency},{direction},5411,shop,note,,{tid}"
 
 
 def _old_repo(
@@ -80,7 +80,7 @@ def test_account_from_filename_and_currency_from_registry(tmp_path):
     repo = _old_repo(
         tmp_path,
         accounts=(("my_acc", "USD", True),),
-        files={"my_acc_2026-01-01_2026-01-31.csv": _csv(_row("t1"))},
+        files={"my_acc_2026-01-01_2026-01-31.csv": _csv(_row("t1", currency="USD"))},
     )
     accounts = read_accounts(repo / "data" / "accounts.yaml")
     (t,) = read_raw(repo / "data" / "monobank_import", accounts)
@@ -143,6 +143,13 @@ def test_unknown_direction_raises_with_id(tmp_path):
 def test_negative_amount_raises_with_id(tmp_path):
     repo = _old_repo(tmp_path, files={"acc1_2026-01-01_2026-01-31.csv": _csv(_row("neg-1", amount="-5.00"))})
     with pytest.raises(ValueError, match="neg-1"):
+        read_raw(repo / "data" / "monobank_import", read_accounts(repo / "data" / "accounts.yaml"))
+
+
+def test_row_currency_differing_from_account_raises_with_id(tmp_path):
+    """The old loader refuses this too: a USD row in a UAH account must never be summed as UAH."""
+    repo = _old_repo(tmp_path, files={"acc1_2026-01-01_2026-01-31.csv": _csv(_row("usd-1", currency="USD"))})
+    with pytest.raises(ValueError, match="usd-1"):
         read_raw(repo / "data" / "monobank_import", read_accounts(repo / "data" / "accounts.yaml"))
 
 

@@ -74,6 +74,9 @@ def _transaction(row: dict, account: Account) -> Transaction:
         raise ValueError(f"negative amount (transaction {tid})")
     if row["direction"] not in _DIRECTIONS:
         raise ValueError(f"direction {row['direction']!r} is not income or expense (transaction {tid})")
+    declared = (row.get("currency") or "").strip()
+    if declared and declared != account.currency:
+        raise ValueError(f"currency {declared!r} differs from account {account.id} ({account.currency}) (transaction {tid})")
     return Transaction(
         id=tid, account_id=account.id, date=date.fromisoformat(row["date"]), time=_utc(row["time"]),
         amount=amount, currency=account.currency, direction=row["direction"],
