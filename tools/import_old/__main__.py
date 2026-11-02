@@ -20,6 +20,10 @@ def run(old_repo: Path, conn: psycopg.Connection) -> dict[str, int]:
     print(f"not imported: {len(dropped)} overrides for transactions outside phase 0 input")
     for g in dropped:
         print(f"  {g.transaction_id}")
+    stale = db.stale_transaction_ids(conn, known)
+    print(f"not in source: {len(stale)} stored transactions")
+    for tid in stale:
+        print(f"  {tid}")
     counts = db.replace_imported(
         conn,
         accounts=accounts,
