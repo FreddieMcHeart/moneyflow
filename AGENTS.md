@@ -61,6 +61,10 @@ Notes from the probe:
 2. `moneyflow.services` must not import `moneyflow.api` or `moneyflow.agent`.
 3. Nothing under `src/` imports `tools`.
 
+## Commits and releases
+
+Commits on `main` must be conventional (`feat:`, `fix:`, `chore:` ...). semantic-release reads them on every push to `main`: `fix:` cuts a patch, `feat:` a minor, and it updates `CHANGELOG.md` and the version in `pyproject.toml`.
+
 ## No real data
 
 No real data in this repo, ever: no real amounts, ids, descriptions or account names. Tests use synthetic fixtures only. The old repo's data is read at run time from `--old-repo` and is never copied in.
