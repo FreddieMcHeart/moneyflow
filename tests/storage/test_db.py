@@ -219,3 +219,16 @@ def test_transaction_source_round_trip(conn):
     txs = (tx("t1"), tx("m1", source="manual"))
     _write(conn, transactions=txs)
     assert {t.id: t.source for t in db.load_inputs(conn).transactions} == {"t1": "bank", "m1": "manual"}
+
+
+def test_reimport_replaces_manual_transaction(conn):
+    first = tx("manual-1", amount="10.00", source="manual")
+    second = replace(first, amount=Decimal("25.00"), description="edited")
+    _write(conn, transactions=(first,), rulings=(ruling("manual:manual-1", "manual-1", "food"),))
+    _write(conn, transactions=(second,), rulings=(ruling("manual:manual-1", "manual-1", "misc"),),
+           categories=("food", "misc"))
+    got = db.load_inputs(conn)
+    assert [(t.id, t.source, t.amount, t.description) for t in got.transactions] == [
+        ("manual-1", "manual", Decimal("25.00"), "edited")
+    ]
+    assert [(g.id, g.payload["category"]) for g in got.rulings] == [("manual:manual-1", "misc")]

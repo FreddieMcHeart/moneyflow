@@ -16,6 +16,14 @@ Stage = Callable[[list[LedgerEntry], Inputs], list[LedgerEntry]]
 STAGES: list[Stage] = [ingest, exclude, reclassify, categorize, exclude_late, split, arithmetic]
 
 
+def _refuse_manual_not_kept(inputs: Inputs, entries: list[LedgerEntry]) -> None:
+    """A30/A31: a manual transaction exists to be counted, so one that ends excluded or unresolved is an error."""
+    kept = {e.transaction_id for e in entries if e.status == "kept"}
+    for tx in inputs.transactions:
+        if tx.source == "manual" and tx.id not in kept:
+            raise BuildRefused(f"manual transaction {tx.id} did not end kept", None)
+
+
 def build(inputs: Inputs) -> Ledger:
     known = {t.id for t in inputs.transactions}
     for ruling in inputs.rulings:
@@ -24,4 +32,5 @@ def build(inputs: Inputs) -> Ledger:
     entries: list[LedgerEntry] = []
     for stage in STAGES:
         entries = stage(entries, inputs)
+    _refuse_manual_not_kept(inputs, entries)
     return tuple(sorted(entries, key=lambda e: (e.date, e.transaction_id, e.part)))
