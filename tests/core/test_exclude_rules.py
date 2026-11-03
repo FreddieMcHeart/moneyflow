@@ -168,6 +168,26 @@ def test_cross_owner_beats_cashback_text():
     assert got["out"].reason == "cross-owner-transfer"
 
 
+def test_cross_owner_claims_its_income_leg_before_other_owner_income():
+    out = row("out", "his", "Owner B Test", direction="expense")
+    into = row("in", "hers", "Alpha Test", direction="income")
+    filler = (
+        row("f1", "his", "f", day=1, direction="expense"),
+        row("f2", "his", "f", day=28, direction="expense"),
+        row("f3", "hers", "f", day=1, direction="expense"),
+        row("f4", "hers", "f", day=28, direction="expense"),
+    )
+    got = run(out, into, *filler)
+    assert got["in"].reason == "cross-owner-transfer"
+    assert got["out"].reason == "cross-owner-transfer"
+
+
+def test_other_owner_income_leaves_an_excluded_row_alone():
+    ruled = (exclude_ruling("x1", "a", "cash-deposit"),)
+    got = run(row("a", "hers"), rulings=ruled)
+    assert state(got["a"]) == ("excluded", "cash-deposit", "ruling:x1")
+
+
 def test_other_owner_income_beats_a_rule():
     got = run(row("a", "hers", "кешбек"), rules=(CASHBACK,))
     assert state(got["a"]) == ("excluded", "other-owner-income", "core:other-owner-income")
