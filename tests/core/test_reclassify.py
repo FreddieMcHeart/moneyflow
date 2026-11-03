@@ -1,7 +1,7 @@
 import pytest
 
 from moneyflow.core.build import build
-from moneyflow.core.model import BuildRefused, Rule
+from moneyflow.core.model import BuildRefused, Rule, Ruling
 from tests.core._builders import exclude_ruling, inputs, rule, ruling, tx
 
 CATS = frozenset({"Fuel", "Income", "Investments", "Reimb"})
@@ -135,3 +135,29 @@ def test_malformed_reclassify_rule_refuses():
     bad = _rule("c1", "cancellation", {}, nonsense="x")
     with pytest.raises(BuildRefused):
         _build((tx(direction="income"),), (bad,))
+
+
+def _reimb(id, tx_id, category):
+    return Ruling(id=id, transaction_id=tx_id, kind="reimbursement", payload={"category": category}, created_by="test")
+
+
+def test_reimbursement_ruling_sets_category_and_direction():
+    got = _build((tx(direction="income", amount="100.00"),), (), (_reimb("r1", "t1", "Fuel"),))[("t1", 0)]
+    assert (got.status, got.direction, got.category, got.subcategory) == ("kept", "reimbursement", "Fuel", None)
+    assert (got.decided_by, got.via) == ("ruling:r1", "ruling:r1")
+    assert got.amount == 100
+
+
+def test_reimbursement_ruling_unknown_category_refuses():
+    with pytest.raises(BuildRefused):
+        _build((tx(direction="income"),), (), (_reimb("r1", "t1", "Nope"),))
+
+
+def test_reimbursement_ruling_on_an_excluded_entry_refuses():
+    with pytest.raises(BuildRefused):
+        _build((tx(direction="income"),), (), (exclude_ruling("x1", "t1", "manual"), _reimb("r1", "t1", "Fuel")))
+
+
+def test_two_reimbursement_rulings_on_one_transaction_refuse():
+    with pytest.raises(BuildRefused):
+        _build((tx(direction="income"),), (), (_reimb("r1", "t1", "Fuel"), _reimb("r2", "t1", "Fuel")))
