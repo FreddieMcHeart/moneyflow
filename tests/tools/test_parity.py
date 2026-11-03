@@ -1,13 +1,17 @@
 """Synthetic rows only; no real data."""
 
+from contextlib import nullcontext
+from dataclasses import replace
 from datetime import date
 from decimal import Decimal
+from types import SimpleNamespace as NS
 
 import pytest
 
+import tools.parity.__main__ as parity_main
 from moneyflow.core.model import LedgerEntry
 from tools.parity.compare import ParityResult, compare
-from tools.parity.__main__ import exit_code
+from tools.parity.__main__ import excluded_clean, exit_code
 
 
 def _old(tid, category="Cafe", sub="", rule="r1", currency="UAH", amount="500.00", direction="expense"):
@@ -204,3 +208,47 @@ def test_exit_code_includes_excluded_result():
 def test_exit_code_requires_excluded():
     with pytest.raises(TypeError):
         exit_code(_result())  # type: ignore[call-arg]
+
+
+@pytest.mark.parametrize(
+    "flag, value",
+    [
+        ("old_kept_excluded", [("k", "cashback-roundup")]),
+        ("next_slice_excluded", [("s1", "split", "internal-transfer")]),
+        ("split_pending_excluded", ["w1"]),
+        ("not_included_mismatch", ["n1"]),
+    ],
+)
+def test_each_excluded_problem_alone_fails_the_run(flag, value):
+    clean = _clean_excluded()
+    bad = replace(clean, **{flag: value})
+    assert excluded_clean(clean) is True
+    assert excluded_clean(bad) is False
+    assert exit_code(_result(), bad) == 1
+
+
+class _Stop(Exception):
+    pass
+
+
+def test_main_hands_compare_excluded_the_real_allowlists(monkeypatch, tmp_path):
+    inputs = NS(
+        accounts=(NS(id="on", include=True), NS(id="off", include=False)),
+        transactions=(NS(id="t-on", account_id="on"), NS(id="t-off", account_id="off")),
+        rulings=(NS(id="split_pending:p", transaction_id="t-pend"), NS(id="exclude:x", transaction_id="t-on")),
+    )
+    monkeypatch.setattr(parity_main.db, "connect", lambda url: nullcontext(None))
+    monkeypatch.setattr(parity_main.db, "load_ledger", lambda conn: ())
+    monkeypatch.setattr(parity_main.db, "load_inputs", lambda conn: inputs)
+    for name in ("_raw_ids", "_old_ledger", "_rule_names", "_read_csv", "compare"):
+        monkeypatch.setattr(parity_main, name, lambda *a: [])
+    seen = {}
+
+    def fake_compare_excluded(old, raw, new, not_included, pending):
+        seen.update(not_included=not_included, pending=pending)
+        raise _Stop
+
+    monkeypatch.setattr(parity_main, "compare_excluded", fake_compare_excluded)
+    with pytest.raises(_Stop):
+        parity_main.main(["--old-repo", str(tmp_path), "--db", "unused"])
+    assert seen == {"not_included": {"t-off"}, "pending": {"t-pend"}}
