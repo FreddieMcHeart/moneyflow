@@ -89,20 +89,32 @@ def _result(**kw):
     return ParityResult(**{**base, **kw})
 
 
+from tools.parity.compare import compare_excluded  # noqa: E402
+
+
+def _clean_excluded():
+    return compare_excluded(
+        [{"id": "a", "rule": "excluded:internal-transfer"}],
+        {"a"},
+        (LedgerEntry("a", 0, date(2026, 1, 5), "acc1", None, None, Decimal("-1.00"), "UAH",
+                     "excluded", "internal-transfer", "core:internal-transfer"),),
+        set(),
+        set(),
+    )
+
+
 def test_empty_population_fails():
-    assert exit_code(_result(population=0, compared=0)) != 0
-    assert exit_code(_result(population=3, compared=0, out_of_scope=["x", "y", "z"])) != 0
+    assert exit_code(_result(population=0, compared=0), _clean_excluded()) != 0
+    assert exit_code(_result(population=3, compared=0, out_of_scope=["x", "y", "z"]), _clean_excluded()) != 0
 
 
 def test_exit_code_nonzero_on_differ():
-    assert exit_code(_result(differ=[("a", "category")])) != 0
-    assert exit_code(_result(missing=["a"])) != 0
-    assert exit_code(_result()) == 0
+    assert exit_code(_result(differ=[("a", "category")]), _clean_excluded()) != 0
+    assert exit_code(_result(missing=["a"]), _clean_excluded()) != 0
+    assert exit_code(_result(), _clean_excluded()) == 0
 
 
 # --- excluded rows (Task 10) ---
-
-from tools.parity.compare import compare_excluded  # noqa: E402
 
 
 def _oex(tid, reason="internal-transfer"):
@@ -187,3 +199,8 @@ def test_exit_code_includes_excluded_result():
     assert exit_code(_result(), ok) == 0
     assert exit_code(_result(), bad) != 0
     assert exit_code(_result(), _cx([], [], set())) != 0  # empty excluded population
+
+
+def test_exit_code_requires_excluded():
+    with pytest.raises(TypeError):
+        exit_code(_result())  # type: ignore[call-arg]

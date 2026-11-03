@@ -28,10 +28,10 @@ def _rule_names(data: Path) -> set[str]:
         return {str(r["name"]) for r in yaml.safe_load(handle)["rules"]}
 
 
-def exit_code(result: ParityResult, excluded: ExcludedParityResult | None = None) -> int:
+def exit_code(result: ParityResult, excluded: ExcludedParityResult) -> int:
     clean = not result.differ and not result.missing
     ok = clean and result.population > 0 and result.compared > 0
-    return 0 if ok and (excluded is None or excluded_clean(excluded)) else 1
+    return 0 if ok and excluded_clean(excluded) else 1
 
 
 def excluded_clean(r: ExcludedParityResult) -> bool:
