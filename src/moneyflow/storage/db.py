@@ -133,9 +133,18 @@ def _upsert_facts(conn: psycopg.Connection, accounts: Iterable[Account], transac
 
 
 def _replace_decisions(
-    conn: psycopg.Connection, rules: Iterable[Rule], rulings: Iterable[Ruling], categories: Iterable[str]
+    conn: psycopg.Connection,
+    rules: Iterable[Rule],
+    rulings: Iterable[Ruling],
+    categories: Iterable[str],
+    transaction_ids: list[str],
 ) -> None:
-    for table in ("rulings", "rules", "categories"):
+    # An import ruling on a transaction missing from the source (stale) is kept: it is still that
+    # transaction's decision. Rules and categories are replaced whole, as before.
+    conn.execute(
+        "delete from rulings where created_by = 'import' and transaction_id = any(%s)", (transaction_ids,)
+    )
+    for table in ("rules", "categories"):
         conn.execute(f"delete from {table} where created_by = 'import'")  # type: ignore[arg-type]
     _insert_many(
         conn,
@@ -165,8 +174,14 @@ def replace_imported(
     rulings: Iterable[Ruling],
     categories: Iterable[str],
 ) -> dict[str, int]:
-    """One transaction: upsert facts by id, replace the `import` decision rows, return counts per table."""
+    """One transaction: upsert facts by id, replace the `import` decision rows, return counts per table.
+
+    An import ruling whose transaction is not among the incoming `transactions` survives the
+    re-import. Such a ruling can name a category that a later `categories.yaml` drops; `categorize`
+    then refuses `unknown category` (0 occurrences today).
+    """
+    transactions = tuple(transactions)
     with conn.transaction():
         _upsert_facts(conn, accounts, transactions)
-        _replace_decisions(conn, rules, rulings, categories)
+        _replace_decisions(conn, rules, rulings, categories, [t.id for t in transactions])
         return {t: _rows(conn, f"select count(*) as n from {t}")[0]["n"] for t in _TABLES}  # type: ignore[arg-type]

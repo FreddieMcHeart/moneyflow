@@ -228,3 +228,11 @@ def test_stored_transaction_gone_from_source_is_reported_not_deleted(conn, tmp_p
     assert "not in source: 1 stored transactions\n  t2\n" in out
     assert counts["transactions"] == 2
     assert [t.id for t in db.load_inputs(conn).transactions] == ["t1", "t2"]
+
+
+def test_stale_transaction_ruling_survives_import_cli(conn, tmp_path):
+    repo = _db_repo(tmp_path)
+    run(repo, conn)
+    (repo / "data" / "monobank_import" / "acc1_2026-01-01_2026-01-31.csv").write_text(_csv(_row("t2", "3.00", "income")))
+    run(repo, conn)
+    assert {r.id for r in db.load_inputs(conn).rulings} == {"override:t1", "override:t2"}

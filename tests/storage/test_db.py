@@ -104,3 +104,22 @@ def test_load_inputs_reads_one_snapshot(conn, db_url, monkeypatch):
 
     monkeypatch.setattr(db, "_rows", rows_then_concurrent_insert)
     assert [t.id for t in db.load_inputs(conn).transactions] == ["t1"]
+
+
+def test_reimport_keeps_ruling_of_transaction_missing_from_source(conn):
+    t1, t2 = tx("t1"), tx("t2")
+    _write(conn, transactions=(t1, t2), rulings=(ruling("override:t1", "t1", "food"),))
+    _write(conn, transactions=(t2,))
+    rows = conn.execute("select id, created_by from rulings order by id").fetchall()
+    assert [(r["id"], r["created_by"]) for r in rows] == [("override:t1", "import")]
+    assert db.stale_transaction_ids(conn, ["t2"]) == ["t1"]
+
+
+def test_reimport_replaces_ruling_of_transaction_still_in_source(conn):
+    # negative control: passes before the fix, proved by mutation (see the task report)
+    t1 = tx("t1")
+    _write(conn, transactions=(t1,), rulings=(ruling("override:t1", "t1", "food"),))
+    _write(conn, transactions=(t1,), rulings=(ruling("override:t1", "t1", "misc"),), categories=("food", "misc"))
+    got = db.load_inputs(conn).rulings
+    assert len(got) == 1
+    assert got[0].payload["category"] == "misc"
