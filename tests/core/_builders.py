@@ -70,6 +70,19 @@ def white_card_ruling(id: str, transaction_id: str) -> Ruling:
     return Ruling(id=id, transaction_id=transaction_id, kind="white_card", payload={}, created_by="test")
 
 
+def split_ruling(
+    transaction_id: str,
+    n: int,
+    amount: str,
+    category: str,
+    subcategory: str | None = None,
+    label: str | None = None,
+    date: str | None = None,
+) -> Ruling:
+    payload = {"amount": amount, "category": category, "subcategory": subcategory, "label": label, "date": date}
+    return Ruling(id=f"split:{transaction_id}:{n}", transaction_id=transaction_id, kind="split", payload=payload, created_by="test")
+
+
 def inputs(
     transactions: tuple[Transaction, ...] = (),
     rules: tuple[Rule, ...] = (),

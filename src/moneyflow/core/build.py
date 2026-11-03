@@ -9,10 +9,11 @@ from moneyflow.core.stages.exclude import exclude
 from moneyflow.core.stages.exclude_late import exclude_late
 from moneyflow.core.stages.ingest import ingest
 from moneyflow.core.stages.reclassify import reclassify
+from moneyflow.core.stages.split import split
 
 Stage = Callable[[list[LedgerEntry], Inputs], list[LedgerEntry]]
 
-STAGES: list[Stage] = [ingest, exclude, reclassify, categorize, exclude_late, arithmetic]
+STAGES: list[Stage] = [ingest, exclude, reclassify, categorize, exclude_late, split, arithmetic]
 
 
 def build(inputs: Inputs) -> Ledger:

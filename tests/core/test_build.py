@@ -8,6 +8,7 @@ from moneyflow.core.stages.reclassify import reclassify
 from moneyflow.core.stages.exclude import exclude
 from moneyflow.core.stages.exclude_late import exclude_late
 from moneyflow.core.stages.ingest import ingest
+from moneyflow.core.stages.split import split
 from tests.core._builders import inputs, ruling, tx
 
 
@@ -26,4 +27,4 @@ def test_build_is_deterministic():
 
 
 def test_stage_order():
-    assert STAGES == [ingest, exclude, reclassify, categorize, exclude_late, arithmetic]
+    assert STAGES == [ingest, exclude, reclassify, categorize, exclude_late, split, arithmetic]
