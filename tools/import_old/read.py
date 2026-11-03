@@ -3,13 +3,13 @@
 import ast
 import csv
 import itertools
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, time
 from decimal import Decimal
 from pathlib import Path
 
 import yaml
 
-from moneyflow.core.model import Account, Owner, Rule, Ruling, Transaction
+from moneyflow.core.model import Account, Owner, Person, Rule, Ruling, Transaction
 
 _DIRECTIONS = ("income", "expense")
 _AMOUNT_KEYS = ("amount_lt", "amount_gte")
@@ -115,7 +115,9 @@ def read_raw(directory: Path, accounts: tuple[Account, ...]) -> tuple[Transactio
 def read_owners(path: Path) -> tuple[Owner, ...]:
     """`owners:` and `budget_owner:` of the old accounts.yaml; exactly one owner gets `budget=True`."""
     doc = _load(path)
-    owners = doc["owners"]
+    owners = doc.get("owners")
+    if not owners:
+        raise ValueError("owners: missing in accounts.yaml")
     budget = doc.get("budget_owner")
     if budget not in owners:
         raise ValueError(f"budget_owner {budget!r} is not a key of owners: in the old accounts.yaml")
@@ -135,6 +137,8 @@ def _constants(path: Path) -> dict[str, ast.expr]:
     for node in ast.parse(Path(path).read_text(encoding="utf-8")).body:
         if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
             out[node.targets[0].id] = node.value
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name) and node.value is not None:
+            out[node.target.id] = node.value
     return out
 
 
@@ -244,27 +248,115 @@ def read_exclude_rulings(manual: Path, exclusions_source: Path) -> tuple[Ruling,
     )
 
 
-def read_white_card_rulings(manual: Path, overrides: tuple[Ruling, ...]) -> tuple[tuple[Ruling, ...], tuple[Ruling, ...]]:
-    """`white_card` rulings, plus a temporary `split_pending` category ruling for a leg with a split and no override.
-
-    0b.2 replaces the placeholder with the split itself (operator ruling 2026-11-03).
-    """
-    doc = _load(manual)
-    overridden = {g.transaction_id for g in overrides}
-    splits = doc.get("splits") or {}
-    white = tuple(
+def read_white_card_rulings(manual: Path) -> tuple[Ruling, ...]:
+    """`white_card` rulings. A leg that also has a split needs nothing else: A4 accepts the split ruling."""
+    return tuple(
         Ruling(id=f"white_card:{tx}", transaction_id=str(tx), kind="white_card", payload={}, created_by="import")
-        for tx in (doc.get("white_card_spending") or {})
+        for tx in (_load(manual).get("white_card_spending") or {})
     )
-    pending = []
-    for g in white:
-        tx = g.transaction_id
-        if tx in splits and tx not in overridden:
-            first = splits[tx]["parts"][0]
-            pending.append(Ruling(
-                id=f"split_pending:{tx}", transaction_id=tx, kind="category",
-                payload={"category": first["category"], "subcategory": first.get("subcategory"),
-                         "note": "split-pending: temporary until the split is applied (0b.2)"},
-                created_by="import",
-            ))
-    return white, tuple(pending)
+
+
+def read_split_rulings(manual: Path) -> tuple[Ruling, ...]:
+    """One `split:<tx>:<n>` ruling per part. A part named by `description` keeps it as `label`, with no subcategory."""
+    rulings: list[Ruling] = []
+    for tx, entry in (_load(manual).get("splits") or {}).items():
+        for n, part in enumerate(entry["parts"], start=1):
+            day = part.get("date")
+            payload = {
+                "amount": str(part["amount"]), "category": part["category"], "subcategory": part.get("subcategory"),
+                "label": part.get("description"), "date": None if day is None else str(day),
+            }
+            rulings.append(Ruling(id=f"split:{tx}:{n}", transaction_id=str(tx), kind="split", payload=payload, created_by="import"))
+    return tuple(rulings)
+
+
+def read_reimbursement_rulings(manual: Path) -> tuple[Ruling, ...]:
+    return tuple(
+        Ruling(id=f"reimbursement:{tx}", transaction_id=str(tx), kind="reimbursement",
+               payload={"category": str(category)}, created_by="import")
+        for tx, category in (_load(manual).get("reimbursements") or {}).items()
+    )
+
+
+def read_debt_rulings(manual: Path) -> tuple[Ruling, ...]:
+    return tuple(
+        Ruling(id=f"debt:{tx}", transaction_id=str(tx), kind="debt",
+               payload={"person": str(d["person"]), "kind": str(d["kind"]), "note": d.get("note")}, created_by="import")
+        for tx, d in (_load(manual).get("debts") or {}).items()
+    )
+
+
+def read_people(manual: Path) -> tuple[Person, ...]:
+    """`debt_people:`; the person's name is both id and display, as the old pipeline wrote it into the subcategory."""
+    return tuple(
+        Person(id=str(name), display=str(name), opening_balance=Decimal(str(p["opening_balance"])), note=p.get("note"))
+        for name, p in (_load(manual).get("debt_people") or {}).items()
+    )
+
+
+def _manual_transaction(key: str, entry: dict, accounts: dict[str, Account]) -> Transaction:
+    account = accounts.get(entry["account"])
+    if account is None:
+        raise ValueError(f"manual_expenses {key}: account {entry['account']!r} is not among the imported accounts")
+    day = date.fromisoformat(str(entry["date"]))
+    return Transaction(
+        id=str(key), account_id=account.id, date=day, time=datetime.combine(day, time(12, 0)),
+        amount=Decimal(str(entry["amount"])), currency=account.currency, direction=entry.get("direction", "expense"),
+        mcc=None, description=entry["description"], comment=entry["note"], source="manual",
+    )
+
+
+def read_manual_transactions(manual: Path, accounts: tuple[Account, ...]) -> tuple[tuple[Transaction, ...], tuple[Ruling, ...]]:
+    """One manual transaction and one `manual:<tx>` category ruling per `manual_expenses:` entry.
+
+    Not ported: the old loader's `new_subcategory` flag only validates that a (category, subcategory) pair is
+    produced somewhere; it changes no ledger value, so it is not read.
+    """
+    by_id = {a.id: a for a in accounts}
+    entries = (_load(manual).get("manual_expenses") or {}).items()
+    transactions = tuple(_manual_transaction(str(k), e, by_id) for k, e in entries)
+    rulings = tuple(
+        Ruling(id=f"manual:{k}", transaction_id=str(k), kind="category",
+               payload={"category": e["category"], "subcategory": e.get("subcategory") or None, "note": e["note"]}, created_by="import")
+        for k, e in entries
+    )
+    return transactions, rulings
+
+
+def _literal(source: Path, name: str) -> object:
+    return ast.literal_eval(_constant(_constants(source), name, source))
+
+
+def _investment_literal(source: Path) -> str:
+    literals = _alternatives(_regex_source(_constants(source), "INVESTMENT_WITHDRAWAL", source))
+    if len(literals) != 1:
+        raise ValueError(f"INVESTMENT_WITHDRAWAL has {len(literals)} alternatives in the old {Path(source).name}, expected 1")
+    return literals[0]
+
+
+def _person_return_rule(description: str, target: tuple[str, str], ordinal: int) -> Rule:
+    category, name = target
+    if not name.endswith("-return"):
+        raise ValueError(f"person return rule name {name!r} does not end in -return")
+    return Rule(
+        id=name, kind="person_return", priority=0, ordinal=ordinal, match={"description_equals": description},
+        result={"person": name.removesuffix("-return"), "category": category}, active=True, created_by="import",
+    )
+
+
+def read_reclassify_rules(source: Path) -> tuple[Rule, ...]:
+    """A16, A20, A21 and A22 as rules, read from the constants of the old `finance/` modules, never executed."""
+    source = Path(source)
+    single = (
+        ("import-credit-repayment", "credit_repayment", {"description_prefix": _literal(source / "exclusions.py", "_REPAYMENT_PREFIX")}),
+        ("import-cancellation", "cancellation", {"description_prefix": _literal(source / "refunds.py", "REFUND_PREFIX")}),
+        ("import-investment-withdrawal", "investment_withdrawal",
+         {"description_contains": _investment_literal(source / "investment_withdrawals.py"), "direction": "income"}),
+    )
+    rules = [
+        Rule(id=rid, kind=kind, priority=0, ordinal=0, match=match, result={}, active=True, created_by="import")  # type: ignore[arg-type]
+        for rid, kind, match in single
+    ]
+    returns = _literal(source / "person_returns.py", "PERSON_RETURNS")
+    rules += [_person_return_rule(d, t, i) for i, (d, t) in enumerate(returns.items())]  # type: ignore[attr-defined]
+    return tuple(rules)

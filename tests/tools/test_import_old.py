@@ -11,7 +11,7 @@ import yaml
 from moneyflow.services.rebuild import rebuild
 from moneyflow.storage import db
 from tools.import_old.__main__ import run
-from tools.import_old.read import read_accounts, read_categories, read_overrides, read_raw, read_rules
+from tools.import_old.read import read_accounts, read_categories, read_overrides, read_owners, read_raw, read_rules
 
 _HEADER = "date,time,amount,currency,direction,mcc,description,comment,category,id"
 _HEADER_UAH = "date,time,amount_uah,direction,mcc,description,comment,category,id"
@@ -25,7 +25,23 @@ CASH_CUTOVER = date(2026, 11, 1)
 CASH_ACCOUNT = "cash-test"
 """
 
+_REFUNDS_SOURCE = """REFUND_PREFIX = "Скасування."
+"""
+
+_INVESTMENT_SOURCE = """import re
+
+INVESTMENT_WITHDRAWAL = re.compile(r"інжур", re.IGNORECASE)
+"""
+
+_PERSON_RETURNS_SOURCE = """PERSON_RETURNS: dict[str, tuple[str, str]] = {
+    "From: alice": ("food", "alice-return"),
+    "From: bob": ("misc", "bob-return"),
+}
+"""
+
 _EXCLUSIONS_SOURCE = """import re
+
+_REPAYMENT_PREFIX = "Погашення "
 
 _CASHBACK = re.compile(r"(кешбек|кешбэк|округленн?я\\s+балансу)", re.IGNORECASE)
 _CREDIT_DRAWDOWN = re.compile(
@@ -64,13 +80,19 @@ def _old_repo(
     budget_owner: str = "o",
     manual: dict | None = None,
     exclusions_source: str = _EXCLUSIONS_SOURCE,
+    with_cash_account: bool = True,
 ) -> Path:
+    if with_cash_account and "cash-test" not in {a[0] for a in accounts}:
+        accounts = (*accounts, ("cash-test", "UAH", True))
     data = tmp_path / "old" / "data"
     (data / "monobank_import" / "categorized").mkdir(parents=True)
     finance = tmp_path / "old" / "scripts" / "python" / "finance"
     finance.mkdir(parents=True)
     (finance / "cash.py").write_text(_CASH_SOURCE)
     (finance / "exclusions.py").write_text(exclusions_source)
+    (finance / "refunds.py").write_text(_REFUNDS_SOURCE)
+    (finance / "investment_withdrawals.py").write_text(_INVESTMENT_SOURCE)
+    (finance / "person_returns.py").write_text(_PERSON_RETURNS_SOURCE)
     (data / "accounts.yaml").write_text(_accounts_yaml(*accounts, owners=owners, budget_owner=budget_owner))
     (data / "categories.yaml").write_text(
         yaml.safe_dump({"categories": [{"name": "food"}, {"name": "misc"}]})
@@ -185,7 +207,7 @@ def test_row_currency_differing_from_account_raises_with_id(tmp_path):
 
 
 def test_categories_and_accounts_read(tmp_path):
-    repo = _old_repo(tmp_path, accounts=(("a", "UAH", True), ("b", "USD", False)))
+    repo = _old_repo(tmp_path, accounts=(("a", "UAH", True), ("b", "USD", False)), with_cash_account=False)
     assert read_categories(repo / "data" / "categories.yaml") == frozenset({"food", "misc"})
     accounts = read_accounts(repo / "data" / "accounts.yaml")
     assert [(a.id, a.currency, a.include) for a in accounts] == [("a", "UAH", True), ("b", "USD", False)]
@@ -244,7 +266,7 @@ def test_reimport_is_idempotent_and_keeps_non_import_rows(conn, tmp_path):
         " values ('op1', 't1', 'category', '{\"category\": \"misc\", \"subcategory\": null}', 'operator')"
     )
     second = run(repo, conn)
-    assert first == {"owners": 1, "accounts": 1, "transactions": 2, "rules": 8, "rulings": 2, "categories": 2, "people": 0}
+    assert first == {"owners": 1, "accounts": 2, "transactions": 2, "rules": 13, "rulings": 2, "categories": 2, "people": 0}
     assert second == {**first, "rulings": 3}
     assert {r.id for r in db.load_inputs(conn).rulings} == {"override:t1", "override:t2", "op1"}
 
@@ -351,17 +373,16 @@ def test_white_card_with_override_gets_both_rulings_with_distinct_ids(conn, tmp_
 _SPLIT = {"t1": {"note": "n", "parts": [{"amount": "2.00", "category": "food", "subcategory": "sub"}]}}
 
 
-def test_white_card_split_without_override_gets_split_pending_ruling(conn, tmp_path, capsys):
+def test_white_card_with_split_writes_no_split_pending(conn, tmp_path, capsys):
     repo = _manual_repo(tmp_path, manual={"white_card_spending": {"t1": "wc"}, "splits": _SPLIT})
     run(repo, conn)
     rulings = _by_id(conn, "rulings")
-    pending = rulings["split_pending:t1"]
-    assert (pending.kind, pending.payload["category"], pending.payload["subcategory"]) == ("category", "food", "sub")
-    assert "split-pending" in str(pending.payload["note"])
-    assert "imported split_pending rulings: 1" in capsys.readouterr().out
+    assert not [i for i in rulings if i.startswith("split_pending")]
+    assert (rulings["white_card:t1"].kind, rulings["split:t1:1"].kind) == ("white_card", "split")
+    assert "split_pending" not in capsys.readouterr().out
 
 
-def test_split_pending_leg_passes_a4_in_rebuild(conn, tmp_path):
+def test_white_card_split_leg_builds_in_rebuild(conn, tmp_path):
     owners = {
         "o": {"display": "Owner O", "counterparty_strings": ["o-name"]},
         "p": {"display": "Owner P", "counterparty_strings": ["p-name"]},
@@ -370,6 +391,7 @@ def test_split_pending_leg_passes_a4_in_rebuild(conn, tmp_path):
     other = "2026-01-05,2026-01-05T13:00:00+02:00,7.00,UAH,expense,5411,shop,,,t9"
     repo = _old_repo(
         tmp_path, accounts=(("acc1", "UAH", True), ("acc2", "UAH", True)), owners=owners,
+        rules=[{"name": "to-p", "priority": 1, "match": {"description_contains": "to p-name"}, "category": "misc"}],
         manual={"white_card_spending": {"t1": "wc"}, "splits": _SPLIT},
         files={"acc1_2026-01-01_2026-01-31.csv": _csv(leg), "acc2_2026-01-01_2026-01-31.csv": _csv(other)},
     )
@@ -379,12 +401,127 @@ def test_split_pending_leg_passes_a4_in_rebuild(conn, tmp_path):
             "accounts": [
                 {"id": "acc1", "name": "n1", "currency": "UAH", "owner": "o", "role": "spending", "include": True},
                 {"id": "acc2", "name": "n2", "currency": "UAH", "owner": "p", "role": "spending", "include": True},
+                {"id": "cash-test", "name": "c", "currency": "UAH", "owner": "o", "role": "spending", "include": True},
             ],
         })
     )
     run(repo, conn)
-    entry = next(e for e in rebuild(conn) if e.transaction_id == "t1")
-    assert (entry.status, entry.category, entry.decided_by) == ("kept", "food", "ruling:split_pending:t1")
+    parts = sorted((e.part, e.status, e.category, e.amount) for e in rebuild(conn) if e.transaction_id == "t1")
+    assert parts == [
+        (0, "excluded", "misc", Decimal("-30.00")),
+        (1, "kept", "food", Decimal("-2.00")),
+        (2, "kept", "misc", Decimal("-28.00")),
+    ]
+
+
+def test_split_becomes_split_rulings(conn, tmp_path):
+    split = {"t1": {"note": "n", "parts": [
+        {"amount": "2.00", "category": "food", "subcategory": "sub"},
+        {"amount": "3.00", "category": "misc", "description": "lunch", "date": "2026-01-06"},
+    ]}}
+    run(_manual_repo(tmp_path, manual={"splits": split}), conn)
+    rulings = _by_id(conn, "rulings")
+    assert (rulings["split:t1:1"].kind, dict(rulings["split:t1:1"].payload)) == (
+        "split", {"amount": "2.00", "category": "food", "subcategory": "sub", "label": None, "date": None},
+    )
+    assert dict(rulings["split:t1:2"].payload) == {
+        "amount": "3.00", "category": "misc", "subcategory": None, "label": "lunch", "date": "2026-01-06",
+    }
+
+
+def test_reimbursements_become_rulings(conn, tmp_path):
+    run(_manual_repo(tmp_path, manual={"reimbursements": {"t1": "food"}}), conn)
+    ruling = _by_id(conn, "rulings")["reimbursement:t1"]
+    assert (ruling.kind, ruling.transaction_id, dict(ruling.payload)) == ("reimbursement", "t1", {"category": "food"})
+
+
+def test_debts_and_people_imported(conn, tmp_path):
+    manual = {
+        "debt_people": {"alice": {"opening_balance": "10.00", "note": "start"}},
+        "debts": {"t1": {"person": "alice", "kind": "lent", "note": "loan"}},
+    }
+    run(_manual_repo(tmp_path, manual=manual), conn)
+    (person,) = db.load_inputs(conn).people
+    assert (person.id, person.display, person.opening_balance, person.note) == ("alice", "alice", Decimal("10.00"), "start")
+    ruling = _by_id(conn, "rulings")["debt:t1"]
+    assert (ruling.kind, dict(ruling.payload)) == ("debt", {"person": "alice", "kind": "lent", "note": "loan"})
+
+
+_MANUAL_EXPENSES = {
+    "manual-1": {"date": "2026-01-07", "account": "man1", "amount": "12.30", "category": "food",
+                 "subcategory": "sub", "new_subcategory": True, "description": "paid cash", "note": "n1"},
+    "manual-2": {"date": "2026-01-08", "account": "man1", "amount": "50.00", "category": "Income",
+                 "description": "gift", "note": "n2", "direction": "income"},
+}
+
+
+def _manual_expense_repo(tmp_path):
+    repo = _old_repo(
+        tmp_path, accounts=(("acc1", "UAH", True), ("man1", "UAH", True)), manual={"manual_expenses": _MANUAL_EXPENSES},
+        files={"acc1_2026-01-01_2026-01-31.csv": _csv(_row("t1"))},
+    )
+    (repo / "data" / "categories.yaml").write_text(yaml.safe_dump({"categories": [{"name": "food"}, {"name": "Income"}]}))
+    return repo
+
+
+def test_manual_expenses_become_manual_transactions(conn, tmp_path):
+    run(_manual_expense_repo(tmp_path), conn)
+    inputs = db.load_inputs(conn)
+    manual = {t.id: t for t in inputs.transactions if t.source == "manual"}
+    first, second = manual["manual-1"], manual["manual-2"]
+    assert (first.account_id, first.date, first.time, first.amount, first.currency, first.direction) == (
+        "man1", date(2026, 1, 7), datetime(2026, 1, 7, 12, 0), Decimal("12.30"), "UAH", "expense",
+    )
+    assert (first.mcc, first.description, first.comment) == (None, "paid cash", "n1")
+    assert second.direction == "income" and {t.source for t in inputs.transactions if t.id == "t1"} == {"bank"}
+    rulings = _by_id(conn, "rulings")
+    assert (rulings["manual:manual-1"].kind, dict(rulings["manual:manual-1"].payload)) == (
+        "category", {"category": "food", "subcategory": "sub", "note": "n1"},
+    )
+    assert rulings["manual:manual-2"].payload["subcategory"] is None
+
+
+def test_manual_transactions_land_kept_in_rebuild_and_survive_reimport(conn, tmp_path):
+    repo = _manual_expense_repo(tmp_path)
+    run(repo, conn)
+    run(repo, conn)
+    kept = {e.transaction_id: (e.status, e.category, e.amount) for e in rebuild(conn) if e.transaction_id.startswith("manual-")}
+    assert kept == {"manual-1": ("kept", "food", Decimal("-12.30")), "manual-2": ("kept", "Income", Decimal("50.00"))}
+
+
+def test_reclassify_rules_imported(conn, tmp_path, capsys):
+    run(_manual_repo(tmp_path), conn)
+    rules = {r.id: r for r in db.load_inputs(conn).rules if r.kind != "categorize" and r.kind != "exclude"}
+    assert sorted((r.kind, r.id, dict(r.match), dict(r.result)) for r in rules.values()) == [
+        ("cancellation", "import-cancellation", {"description_prefix": "Скасування."}, {}),
+        ("credit_repayment", "import-credit-repayment", {"description_prefix": "Погашення "}, {}),
+        ("investment_withdrawal", "import-investment-withdrawal", {"description_contains": "інжур", "direction": "income"}, {}),
+        ("person_return", "alice-return", {"description_equals": "From: alice"}, {"person": "alice", "category": "food"}),
+        ("person_return", "bob-return", {"description_equals": "From: bob"}, {"person": "bob", "category": "misc"}),
+    ]
+    assert "imported reclassify rules: 5" in capsys.readouterr().out
+
+
+def test_atm_cash_rule_is_imported(conn, tmp_path):
+    rule = {"name": "atm-cash", "priority": 5, "match": {"description_contains": "atm"}, "category": "misc", "subcategory": "Cash"}
+    run(_old_repo(tmp_path, rules=[rule], files={"acc1_2026-01-01_2026-01-31.csv": _csv(_row("t1"))}), conn)
+    stored = _by_id(conn, "rules")["atm-cash"]
+    assert (stored.kind, dict(stored.match), dict(stored.result)) == (
+        "categorize", {"description_contains": "atm"}, {"category": "misc", "subcategory": "Cash"},
+    )
+
+
+def test_missing_owners_key_raises_import_error(conn, tmp_path):
+    repo = _manual_repo(tmp_path)
+    (repo / "data" / "accounts.yaml").write_text(yaml.safe_dump({"budget_owner": "o", "accounts": []}))
+    with pytest.raises(ValueError, match="owners: missing in accounts.yaml"):
+        read_owners(repo / "data" / "accounts.yaml")
+
+
+def test_unknown_cash_account_refuses(conn, tmp_path):
+    repo = _old_repo(tmp_path, with_cash_account=False, files={"acc1_2026-01-01_2026-01-31.csv": _csv(_row("t1"))})
+    with pytest.raises(ValueError, match="cash account 'cash-test' is not among the imported accounts"):
+        run(repo, conn)
 
 
 def test_imports_instalment_exception_ruling(conn, tmp_path):

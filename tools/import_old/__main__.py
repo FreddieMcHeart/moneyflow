@@ -12,12 +12,18 @@ from tools.import_old.read import (
     read_accounts,
     read_cash,
     read_categories,
+    read_debt_rulings,
     read_exclude_rules,
     read_exclude_rulings,
+    read_manual_transactions,
     read_overrides,
     read_owners,
+    read_people,
     read_raw,
+    read_reclassify_rules,
+    read_reimbursement_rulings,
     read_rules,
+    read_split_rulings,
     read_white_card_rulings,
 )
 
@@ -40,38 +46,48 @@ def run(old_repo: Path, conn: psycopg.Connection) -> dict[str, int]:
     data = Path(old_repo) / "data"
     source = Path(old_repo) / "scripts" / "python" / "finance"
     cash_account, cash_from = read_cash(source / "cash.py")
-    accounts = tuple(
-        replace(a, cash_from=cash_from) if a.id == cash_account else a for a in read_accounts(data / "accounts.yaml")
-    )
-    transactions = read_raw(data / "monobank_import", accounts)
-    known = {t.id for t in transactions}
+    read = read_accounts(data / "accounts.yaml")
+    if cash_account not in {a.id for a in read}:
+        raise ValueError(f"cash account {cash_account!r} is not among the imported accounts")
+    accounts = tuple(replace(a, cash_from=cash_from) if a.id == cash_account else a for a in read)
     manual = data / "manual.yaml"
+    manual_transactions, manual_rulings = read_manual_transactions(manual, accounts)
+    transactions = read_raw(data / "monobank_import", accounts) + manual_transactions
+    known = {t.id for t in transactions}
     overrides = read_overrides(manual)
-    white, pending = read_white_card_rulings(manual, overrides)
-    exclude = read_exclude_rulings(manual, source / "exclusions.py")
-    rulings = _report_absent("overrides", overrides, known)
-    rulings += _report_absent("exclude rulings", exclude, known)
-    rulings += _report_absent("white_card rulings", white, known)
-    rulings += _report_absent("split_pending rulings", pending, known)
+    groups = (
+        ("overrides", overrides),
+        ("exclude rulings", read_exclude_rulings(manual, source / "exclusions.py")),
+        ("white_card rulings", read_white_card_rulings(manual)),
+        ("split rulings", read_split_rulings(manual)),
+        ("reimbursement rulings", read_reimbursement_rulings(manual)),
+        ("debt rulings", read_debt_rulings(manual)),
+        ("manual rulings", manual_rulings),
+    )
+    rulings: tuple[Ruling, ...] = ()
+    for label, group in groups:
+        rulings += _report_absent(label, group, known)
     stale = db.stale_transaction_ids(conn, known)
     print(f"not in source: {len(stale)} stored transactions")
     for tid in stale:
         print(f"  {tid}")
     exclude_rules = read_exclude_rules(source / "exclusions.py")
+    reclassify_rules = read_reclassify_rules(source)
     counts = db.replace_imported(
         conn,
         owners=read_owners(data / "accounts.yaml"),
         accounts=accounts,
         transactions=transactions,
-        rules=read_rules(data / "rules.yaml") + exclude_rules,
+        rules=read_rules(data / "rules.yaml") + exclude_rules + reclassify_rules,
         rulings=rulings,
         categories=read_categories(data / "categories.yaml"),
-        people=(),  # BRIDGE T4-B1: no people read yet; Task 10 removes it
+        people=read_people(manual),
     )
     for table, n in counts.items():
         print(f"{table}: {n}")
     print(f"imported exclude rules: {len(exclude_rules)}")
-    for kind, group in (("exclude rulings", exclude), ("white_card rulings", white), ("split_pending rulings", pending)):
+    print(f"imported reclassify rules: {len(reclassify_rules)}")
+    for kind, group in groups[1:]:
         print(f"imported {kind}: {sum(1 for g in group if g.transaction_id in known)}")
     return counts
 
