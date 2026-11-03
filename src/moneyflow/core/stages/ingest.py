@@ -1,6 +1,7 @@
 """Ingest: one entry per transaction, nothing decided yet."""
 
 from moneyflow.core.model import BuildRefused, Inputs, LedgerEntry, Transaction
+from moneyflow.core.owners import budget_owner
 
 
 def _entry(tx: Transaction, include: bool) -> LedgerEntry:
@@ -19,7 +20,17 @@ def _entry(tx: Transaction, include: bool) -> LedgerEntry:
     )
 
 
+def _refuse_uncategorised_white_card(inputs: Inputs) -> None:
+    """A4: a white-card leg is kept on purpose, so it must carry its category on purpose too."""
+    categorised = {r.transaction_id for r in inputs.rulings if r.kind == "category"}
+    for ruling in inputs.rulings:
+        if ruling.kind == "white_card" and ruling.transaction_id not in categorised:
+            raise BuildRefused("white-card leg without a category ruling", ruling.transaction_id)
+
+
 def ingest(entries: list[LedgerEntry], inputs: Inputs) -> list[LedgerEntry]:
+    budget_owner(inputs)  # refuses unless exactly one owner carries the budget
+    _refuse_uncategorised_white_card(inputs)
     accounts = {a.id: a for a in inputs.accounts}
     seen: set[str] = set()
     out: list[LedgerEntry] = []

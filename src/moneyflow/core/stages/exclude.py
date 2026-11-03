@@ -3,7 +3,7 @@
 from dataclasses import replace
 
 from moneyflow.core.cash import cash
-from moneyflow.core.cross_owner import cross_owner
+from moneyflow.core.cross_owner import coverage, cross_owner
 from moneyflow.core.internal import internal
 from moneyflow.core.kinds.exclude import apply_ruling
 from moneyflow.core.model import BuildRefused, Inputs, LedgerEntry
@@ -29,6 +29,16 @@ def _exclude_rulings(entries: list[LedgerEntry], inputs: Inputs) -> list[LedgerE
     return out
 
 
+def _cross_owner(entries: list[LedgerEntry], inputs: Inputs) -> list[LedgerEntry]:
+    reasons = cross_owner(entries, inputs, coverage(inputs.transactions))
+    return [
+        replace(e, status="excluded", reason=reasons[e.transaction_id], decided_by=f"core:{reasons[e.transaction_id]}")
+        if e.transaction_id in reasons
+        else e
+        for e in entries
+    ]
+
+
 def _other_owner_income(entries: list[LedgerEntry], inputs: Inputs) -> list[LedgerEntry]:
     """Slot for A9; Task 5 replaces it. Returns the entries unchanged."""
     return entries
@@ -42,7 +52,7 @@ def _exclude_rules(entries: list[LedgerEntry], inputs: Inputs) -> list[LedgerEnt
 def exclude(entries: list[LedgerEntry], inputs: Inputs) -> list[LedgerEntry]:
     entries = _exclude_rulings(entries, inputs)
     entries = cash(entries, inputs)
-    cross_owner(entries, inputs, {})  # A6/A7/A8: Task 4 wires its result into the entries
+    entries = _cross_owner(entries, inputs)  # A6/A7/A8
     entries = _other_owner_income(entries, inputs)
     entries = _exclude_rules(entries, inputs)
     return internal(entries, inputs)
