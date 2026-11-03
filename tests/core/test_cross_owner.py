@@ -134,6 +134,41 @@ def test_a_blessed_unpaired_id_is_excluded_by_its_ruling_and_not_counted_as_unpa
     assert (e.status, e.reason, e.decided_by) == ("excluded", "cross-owner-unpaired", "ruling:exclude:cross-owner-unpaired:out")
 
 
+def _reasons(inp):
+    return {e.transaction_id: (e.status, e.reason) for e in build(inp) if e.transaction_id in {"out", "back", "b1", "o1", "o2"}}
+
+
+def test_blessed_leg_with_partner_excludes_partner():
+    bless = (exclude_ruling("exclude:cross-owner-unpaired:out", "out", "cross-owner-unpaired"),)
+    inp = world(*pair(), rulings=bless)
+    assert run(inp) == {"back": "cross-owner-transfer"}
+    got = _reasons(inp)
+    assert got["back"] == ("excluded", "cross-owner-transfer")
+    assert got["out"][0] == "excluded"  # the leg keeps its ruling's reason (hand ruling beats every signal)
+
+
+def test_blessed_leg_without_partner_is_excluded_and_not_refused():
+    bless = (exclude_ruling("exclude:cross-owner-unpaired:out", "out", "cross-owner-unpaired"),)
+    assert _reasons(world(row("out", "hers", OUT, "1200.00"), rulings=bless)) == {"out": ("excluded", "cross-owner-unpaired")}
+
+
+def test_two_blessed_legs_one_partner_excludes_legs_keeps_partner_and_does_not_refuse():
+    bless = tuple(exclude_ruling(f"exclude:cross-owner-unpaired:{i}", i, "cross-owner-unpaired") for i in ("o1", "o2"))
+    txs = (row("o1", "hers", OUT, "250.00"), row("o2", "hers", "Owner A Test", "250.00"), row("b1", "his", BACK, "250.00", "income"))
+    inp = world(*txs, rulings=bless)
+    assert run(inp) == {}
+    got = _reasons(inp)
+    assert got["o1"] == got["o2"] == ("excluded", "cross-owner-unpaired")
+    assert got["b1"][0] != "excluded"
+
+
+def test_one_blessed_and_one_unblessed_leg_with_one_partner_refuses():
+    bless = (exclude_ruling("exclude:cross-owner-unpaired:o1", "o1", "cross-owner-unpaired"),)
+    txs = (row("o1", "hers", OUT, "250.00"), row("o2", "hers", "Owner A Test", "250.00"), row("b1", "his", BACK, "250.00", "income"))
+    with pytest.raises(BuildRefused):
+        run(world(*txs, rulings=bless))
+
+
 def test_more_candidates_than_legs_refuses():
     txs = (row("out", "hers", OUT, "200.00"), row("b1", "his", BACK, "200.00", "income"), row("b2", "his", "Owner B Test", "200.00", "income"))
     with pytest.raises(BuildRefused):

@@ -5,7 +5,9 @@ only and reads the description only (never the comment). Coverage is a union ove
 included accounts, never an intersection. A leg is paired with income on the counterparty's included
 accounts that names the payer, by cardinality (n legs, n partners), never greedily.
 
-A7: a leg already excluded by a ruling is decided; it is not counted as an unpaired leg.
+A7: a leg already excluded by a ruling is decided: it never triggers the unpaired refusal, but it still
+counts in its key's cardinality match, as in the old audit. A match also excludes its income partner(s);
+a leg keeps its ruling's reason (a hand ruling beats every signal).
 A8: a leg with a `white_card` ruling is neither paired nor excluded; it stays kept as spending.
 """
 
@@ -37,6 +39,8 @@ class _Context:
     pool: Mapping[str, frozenset[str]]  # owner -> included account ids
     coverage: Coverage
     open: tuple[Transaction, ...]  # transactions whose entry is still unresolved
+    scan: tuple[Transaction, ...]  # open plus transactions already excluded by a ruling (A7 legs)
+    ruled: frozenset[str]
     white: frozenset[str]
 
 
@@ -50,12 +54,15 @@ def _pool(inputs: Inputs) -> dict[str, frozenset[str]]:
 
 def _context(entries: list[LedgerEntry], inputs: Inputs, spans: Coverage) -> _Context:
     unresolved = {e.transaction_id for e in entries if e.status == "unresolved"}
+    ruled = frozenset(e.transaction_id for e in entries if e.status == "excluded" and (e.decided_by or "").startswith("ruling:"))
     return _Context(
         accounts={a.id: a for a in inputs.accounts},
         strings={o.id: o.counterparty_strings for o in inputs.owners},
         pool=_pool(inputs),
         coverage=spans,
         open=tuple(t for t in inputs.transactions if t.id in unresolved),
+        scan=tuple(t for t in inputs.transactions if t.id in unresolved or t.id in ruled),
+        ruled=ruled,
         white=frozenset(r.transaction_id for r in inputs.rulings if r.kind == "white_card"),
     )
 
@@ -85,7 +92,7 @@ def _recipient(tx: Transaction, ctx: _Context) -> str | None:
 
 def _detect(ctx: _Context) -> dict[str, str]:
     detected: dict[str, str] = {}
-    for tx in ctx.open:
+    for tx in ctx.scan:
         recipient = _recipient(tx, ctx) if tx.direction == "expense" else None
         if recipient is not None:
             detected[tx.id] = recipient
@@ -94,7 +101,7 @@ def _detect(ctx: _Context) -> dict[str, str]:
 
 def _group(detected: Mapping[str, str], ctx: _Context) -> dict[Key, list[Transaction]]:
     keys: dict[Key, list[Transaction]] = {}
-    for tx in ctx.open:
+    for tx in ctx.scan:
         if tx.id in detected:
             key = (tx.date, tx.amount, tx.currency, _payer(tx, ctx), detected[tx.id])
             keys.setdefault(key, []).append(tx)
@@ -131,6 +138,17 @@ def _refuse_listing(ruled: set[str], detected: Mapping[str, str], ctx: _Context)
         )
 
 
+def _refuse_unless_blessed(where: str, legs: list[Transaction], partners: list[Transaction], ctx: _Context) -> None:
+    if all(t.id in ctx.ruled for t in legs):
+        return
+    raise BuildRefused(
+        f"{where}: {len(legs)} detected expense leg(s) but {len(partners)} income partner(s) "
+        f"naming the payer ({_detail(legs + partners)}); "
+        "write an exclude ruling for the leg if it really is one-sided",
+        legs[0].id,
+    )
+
+
 def _decide(key: Key, all_legs: list[Transaction], ctx: _Context) -> list[str]:
     day, amount, currency, payer, recipient = key
     legs = [t for t in all_legs if t.id not in ctx.white]
@@ -144,13 +162,9 @@ def _decide(key: Key, all_legs: list[Transaction], ctx: _Context) -> list[str]:
             listed[0].id,
         )
     if legs and len(legs) != len(partners):
-        raise BuildRefused(
-            f"{where}: {len(legs)} detected expense leg(s) but {len(partners)} income partner(s) "
-            f"naming the payer ({_detail(legs + partners)}); "
-            "write an exclude ruling for the leg if it really is one-sided",
-            legs[0].id,
-        )
-    return [t.id for t in legs + partners]
+        _refuse_unless_blessed(where, legs, partners, ctx)
+        return []  # every leg is blessed by a ruling: already excluded, the partners stay kept
+    return [t.id for t in legs + partners if t.id not in ctx.ruled]  # a ruled leg keeps its ruling's reason
 
 
 def cross_owner(entries: list[LedgerEntry], inputs: Inputs, coverage: Coverage) -> Mapping[str, str]:
