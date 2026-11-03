@@ -84,7 +84,7 @@ def _transaction(row: dict, account: Account) -> Transaction:
         id=tid, account_id=account.id, date=date.fromisoformat(row["date"]), time=_utc(row["time"]),
         amount=amount, currency=account.currency, direction=row["direction"],
         mcc=int(row["mcc"]) if row["mcc"] else None,
-        description=row["description"], comment=row["comment"],
+        description=row["description"], comment=row["comment"], source="bank",
     )
 
 

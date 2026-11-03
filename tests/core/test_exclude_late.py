@@ -30,6 +30,8 @@ def entry(account_id: str, category: str | None, status: str = "kept") -> Ledger
         status=status,  # type: ignore[arg-type]
         reason=None,
         decided_by="rule:r1" if status == "kept" else None,
+        direction="expense",
+        via=None,
     )
 
 

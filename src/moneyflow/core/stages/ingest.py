@@ -17,6 +17,8 @@ def _entry(tx: Transaction, include: bool) -> LedgerEntry:
         status="unresolved" if include else "excluded",
         reason=None if include else "account-not-included",
         decided_by=None,
+        direction=tx.direction,
+        via=None,
     )
 
 

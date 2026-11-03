@@ -3,7 +3,7 @@
 from datetime import date, datetime
 from decimal import Decimal
 
-from moneyflow.core.model import Account, Inputs, Owner, Rule, Ruling, Transaction
+from moneyflow.core.model import Account, Inputs, Owner, Person, Rule, Ruling, Transaction
 
 
 def account(id: str = "acc1", currency: str = "UAH", include: bool = True) -> Account:
@@ -22,6 +22,7 @@ def tx(
     direction: str = "expense",
     description: str = "shop",
     day: int = 1,
+    source: str = "bank",
 ) -> Transaction:
     return Transaction(
         id=id,
@@ -34,6 +35,7 @@ def tx(
         mcc=None,
         description=description,
         comment="",
+        source=source,  # type: ignore[arg-type]
     )
 
 
@@ -75,6 +77,7 @@ def inputs(
     accounts: tuple[Account, ...] = (),
     categories: frozenset[str] = frozenset({"food", "misc"}),
     owners: tuple[Owner, ...] = (),
+    people: tuple[Person, ...] = (),
 ) -> Inputs:
     return Inputs(
         owners=owners or (owner(),),
@@ -83,4 +86,5 @@ def inputs(
         rules=rules,
         rulings=rulings,
         categories=categories,
+        people=people,
     )

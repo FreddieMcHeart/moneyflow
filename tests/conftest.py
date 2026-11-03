@@ -7,7 +7,7 @@ from psycopg.conninfo import conninfo_to_dict
 
 from moneyflow.storage import db
 
-_TABLES = "ledger_entries, rulings, rules, categories, transactions, accounts, owners"
+_TABLES = "ledger_entries, rulings, rules, categories, people, transactions, accounts, owners"
 
 
 def require_test_db(url: str) -> None:

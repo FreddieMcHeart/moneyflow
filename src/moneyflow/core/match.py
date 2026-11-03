@@ -1,4 +1,4 @@
-"""Rule matching: the six match keys of the old pipeline, exactly."""
+"""Rule matching: the six match keys of the old pipeline, exactly, plus the two description keys of the 0b.2 kinds."""
 
 from collections.abc import Callable, Mapping
 from decimal import Decimal
@@ -13,6 +13,14 @@ def to_decimal(value: object) -> Decimal:
 
 def _description_contains(value: object, tx: Transaction) -> bool:
     return str(value).lower() in f"{tx.description} {tx.comment}".lower()
+
+
+def _description_prefix(value: object, tx: Transaction) -> bool:
+    return tx.description.lstrip().startswith(str(value))
+
+
+def _description_equals(value: object, tx: Transaction) -> bool:
+    return tx.description.strip() == str(value)
 
 
 def _mcc(value: object, tx: Transaction) -> bool:
@@ -37,6 +45,8 @@ def _amount_gte(value: object, tx: Transaction) -> bool:
 
 _KEYS: dict[str, Callable[[object, Transaction], bool]] = {
     "description_contains": _description_contains,
+    "description_prefix": _description_prefix,
+    "description_equals": _description_equals,
     "mcc": _mcc,
     "account": _account,
     "direction": _direction,

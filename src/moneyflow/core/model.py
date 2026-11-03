@@ -27,6 +27,14 @@ class Account:
 
 
 @dataclass(frozen=True)
+class Person:
+    id: str
+    display: str
+    opening_balance: Decimal
+    note: str | None
+
+
+@dataclass(frozen=True)
 class Transaction:
     id: str
     account_id: str
@@ -38,12 +46,15 @@ class Transaction:
     mcc: int | None
     description: str
     comment: str
+    source: Literal["bank", "manual"]
 
 
 @dataclass(frozen=True)
 class Rule:
     id: str
-    kind: Literal["categorize", "exclude"]
+    kind: Literal[
+        "categorize", "exclude", "credit_repayment", "cancellation", "person_return", "investment_withdrawal"
+    ]
     priority: int
     ordinal: int  # position in the source file
     match: Mapping[str, object]
@@ -56,7 +67,7 @@ class Rule:
 class Ruling:
     id: str
     transaction_id: str
-    kind: Literal["category", "exclude", "white_card"]
+    kind: Literal["category", "exclude", "white_card", "split", "reimbursement", "debt"]
     payload: Mapping[str, str | None]  # category: category, subcategory, note; exclude: reason, note; white_card: empty
     created_by: str
 
@@ -69,11 +80,13 @@ class LedgerEntry:
     account_id: str
     category: str | None
     subcategory: str | None
-    amount: Decimal  # signed: income +, expense -
+    amount: Decimal  # signed: expense -, income and reimbursement +
     currency: str
     status: Literal["kept", "excluded", "unresolved"]
     reason: str | None
     decided_by: str | None
+    direction: Literal["income", "expense", "reimbursement"]  # set by ingest, changed only by reclassify
+    via: str | None  # the reclassify rule or ruling that changed the row: rule:<id> / ruling:<id>
 
 
 @dataclass(frozen=True)
@@ -84,6 +97,7 @@ class Inputs:
     rules: tuple[Rule, ...]
     rulings: tuple[Ruling, ...]
     categories: frozenset[str]
+    people: tuple[Person, ...]
 
 
 Ledger = tuple[LedgerEntry, ...]

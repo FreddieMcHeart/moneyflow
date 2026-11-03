@@ -66,6 +66,7 @@ def run(old_repo: Path, conn: psycopg.Connection) -> dict[str, int]:
         rules=read_rules(data / "rules.yaml") + exclude_rules,
         rulings=rulings,
         categories=read_categories(data / "categories.yaml"),
+        people=(),  # BRIDGE T4-B1: no people read yet; Task 10 removes it
     )
     for table, n in counts.items():
         print(f"{table}: {n}")

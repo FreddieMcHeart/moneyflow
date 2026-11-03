@@ -20,6 +20,7 @@ def make_tx(**over):
         mcc=5814,
         description="x",
         comment="",
+        source="bank",
     )
     base.update(over)
     return Transaction(**base)
@@ -77,3 +78,15 @@ def test_unknown_key_raises():
 def test_direction_key():
     assert matches({"direction": "expense"}, make_tx(direction="expense")) is True
     assert matches({"direction": "income"}, make_tx(direction="expense")) is False
+
+
+def test_description_prefix_ignores_leading_spaces():
+    tx = make_tx(description="   Cancel. shop")
+    assert matches({"description_prefix": "Cancel."}, tx) is True
+    assert matches({"description_prefix": "shop"}, tx) is False
+
+
+def test_description_equals_strips():
+    tx = make_tx(description="  alice  ")
+    assert matches({"description_equals": "alice"}, tx) is True
+    assert matches({"description_equals": "alic"}, tx) is False

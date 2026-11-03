@@ -39,6 +39,7 @@ def row(id: str, account: str, description: str, amount: str = "100.00", directi
         mcc=None,
         description=description,
         comment="",
+        source="bank",
     )
 
 

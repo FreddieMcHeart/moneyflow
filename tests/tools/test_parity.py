@@ -24,7 +24,7 @@ def _old(tid, category="Cafe", sub="", rule="r1", currency="UAH", amount="500.00
 def _new(tid, category="Cafe", sub=None, decided_by="rule:r1", currency="UAH", amount="-500.00", part=0):
     return LedgerEntry(
         tid, part, date(2026, 1, 5), "acc1", category, sub, Decimal(amount), currency,
-        "kept", None, decided_by,
+        "kept", None, decided_by, "expense", None,
     )
 
 
@@ -101,7 +101,7 @@ def _clean_excluded():
         [{"id": "a", "rule": "excluded:internal-transfer"}],
         {"a"},
         (LedgerEntry("a", 0, date(2026, 1, 5), "acc1", None, None, Decimal("-1.00"), "UAH",
-                     "excluded", "internal-transfer", "core:internal-transfer"),),
+                     "excluded", "internal-transfer", "core:internal-transfer", "expense", None),),
         set(),
         set(),
     )
@@ -128,7 +128,7 @@ def _oex(tid, reason="internal-transfer"):
 def _nex(tid, reason="internal-transfer", status="excluded"):
     return LedgerEntry(
         tid, 0, date(2026, 1, 5), "acc1", None, None, Decimal("-1.00"), "UAH",
-        status, reason if status == "excluded" else None, f"core:{reason}",
+        status, reason if status == "excluded" else None, f"core:{reason}", "expense", None,
     )
 
 

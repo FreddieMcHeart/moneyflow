@@ -244,7 +244,7 @@ def test_reimport_is_idempotent_and_keeps_non_import_rows(conn, tmp_path):
         " values ('op1', 't1', 'category', '{\"category\": \"misc\", \"subcategory\": null}', 'operator')"
     )
     second = run(repo, conn)
-    assert first == {"owners": 1, "accounts": 1, "transactions": 2, "rules": 8, "rulings": 2, "categories": 2}
+    assert first == {"owners": 1, "accounts": 1, "transactions": 2, "rules": 8, "rulings": 2, "categories": 2, "people": 0}
     assert second == {**first, "rulings": 3}
     assert {r.id for r in db.load_inputs(conn).rulings} == {"override:t1", "override:t2", "op1"}
 

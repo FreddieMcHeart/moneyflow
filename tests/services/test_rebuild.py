@@ -18,7 +18,7 @@ def _seed(conn, rulings=()):
         transactions=(tx("t1", description="cafe"), tx("t2", description="other")),
         rules=(replace(rule("r1", 10, 0, "food", None, description_contains="cafe"), created_by="import"),),
         rulings=rulings,
-        categories=("food",),
+        categories=("food",), people=(),
     )
 
 
@@ -60,7 +60,7 @@ def test_cli_exit_1_on_broken_rule_value(conn, db_url, capsys):
     db.replace_imported(
         conn, owners=(owner(),), accounts=(account(),), transactions=(tx("t1"),),
         rules=(replace(rule("r1", 10, 0, "food", None, amount_lt="abc"), created_by="import"),),
-        rulings=(), categories=("food",),
+        rulings=(), categories=("food",), people=(),
     )
     assert main(["rebuild", "--db", db_url]) == 1
     err = capsys.readouterr().err
