@@ -104,27 +104,22 @@ def test_empty_match_rule_refuses():
 
 
 def test_categorize_ignores_non_category_rulings():
-    # Driven stage by stage: a white_card ruling on a plain row is refused by the A8 audit in the full
-    # build (T4), and this test is about categorize alone.
-    from moneyflow.core.stages.exclude import _exclude_rulings
-    from moneyflow.core.stages.ingest import ingest
-    from tests.core._builders import exclude_ruling, white_card_ruling
+    from tests.core._builders import exclude_ruling
+    from tests.core.test_cross_owner import OUT, row, white, world
 
-    rulings = (exclude_ruling("x1", "t2", "cash-withdrawal"), white_card_ruling("w1", "t1"), ruling("g0", "t1", "food"))
-    inp = inputs(transactions=(tx("t1"), tx("t2")), rulings=rulings)
-    by_id = {e.transaction_id: e for e in categorize(_exclude_rulings(ingest([], inp), inp), inp)}
-    assert (by_id["t1"].status, by_id["t1"].category) == ("kept", "food")
+    rulings = (exclude_ruling("x1", "t2", "cash-withdrawal"), *white("out"))
+    inp = world(row("out", "hers", OUT), row("t2", "his", "plain"), rulings=rulings)
+    by_id = {e.transaction_id: e for e in build(inp)}
+    assert (by_id["out"].status, by_id["out"].category) == ("kept", "food")
     assert by_id["t2"].status == "excluded" and by_id["t2"].reason == "cash-withdrawal"
 
 
 def test_category_and_white_card_ruling_on_one_leg_do_not_refuse():
-    from moneyflow.core.stages.ingest import ingest
-    from tests.core._builders import white_card_ruling
+    from tests.core.test_cross_owner import OUT, row, white, world
 
-    rulings = (ruling("g1", "t1", "food"), white_card_ruling("w1", "t1"))
-    inp = inputs(transactions=(tx(),), rulings=rulings)
-    (e,) = categorize(ingest([], inp), inp)
-    assert (e.status, e.category, e.decided_by) == ("kept", "food", "ruling:g1")
+    by_id = {e.transaction_id: e for e in build(world(row("out", "hers", OUT), rulings=white("out")))}
+    e = by_id["out"]
+    assert (e.status, e.category, e.decided_by) == ("kept", "food", "ruling:override:out")
 
 
 def test_category_ruling_on_excluded_entry_still_refuses():

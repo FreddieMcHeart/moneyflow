@@ -21,6 +21,7 @@ Coverage = Mapping[str, tuple[date, date]]
 Key = tuple[date, object, str, str, str]  # date, amount, currency, payer owner, recipient owner
 
 REASON = "cross-owner-transfer"
+_CROSS_OWNER_REASONS = frozenset({REASON, "cross-owner-unpaired"})
 
 
 def coverage(transactions: Iterable[Transaction]) -> dict[str, tuple[date, date]]:
@@ -52,9 +53,14 @@ def _pool(inputs: Inputs) -> dict[str, frozenset[str]]:
     return {owner: frozenset(ids) for owner, ids in grouped.items()}
 
 
+def _cross_owner_ruling(entry: LedgerEntry) -> bool:
+    """An excluded entry decided by a ruling whose reason is a cross-owner one (A7)."""
+    return (entry.decided_by or "").startswith("ruling:") and entry.reason in _CROSS_OWNER_REASONS
+
+
 def _context(entries: list[LedgerEntry], inputs: Inputs, spans: Coverage) -> _Context:
     unresolved = {e.transaction_id for e in entries if e.status == "unresolved"}
-    ruled = frozenset(e.transaction_id for e in entries if e.status == "excluded" and (e.decided_by or "").startswith("ruling:"))
+    ruled = frozenset(e.transaction_id for e in entries if e.status == "excluded" and _cross_owner_ruling(e))
     return _Context(
         accounts={a.id: a for a in inputs.accounts},
         strings={o.id: o.counterparty_strings for o in inputs.owners},
@@ -108,6 +114,14 @@ def _group(detected: Mapping[str, str], ctx: _Context) -> dict[Key, list[Transac
     return keys
 
 
+def _first_named(tx: Transaction, recipient: str, ctx: _Context) -> str | None:
+    """The first other owner a row names: one row has one payer, however many names it holds."""
+    for other, needles in ctx.strings.items():
+        if other != recipient and _names(tx, needles):
+            return other
+    return None
+
+
 def _candidates(key: Key, ctx: _Context) -> list[Transaction]:
     day, amount, currency, payer, recipient = key
     pool = ctx.pool.get(recipient, frozenset())
@@ -117,7 +131,7 @@ def _candidates(key: Key, ctx: _Context) -> list[Transaction]:
         if t.direction == "income"
         and t.account_id in pool
         and (t.date, t.amount, t.currency) == (day, amount, currency)
-        and _names(t, ctx.strings.get(payer, ()))
+        and _first_named(t, recipient, ctx) == payer
     ]
 
 
