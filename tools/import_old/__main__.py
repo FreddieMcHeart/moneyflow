@@ -5,6 +5,7 @@ from pathlib import Path
 
 import psycopg
 
+from moneyflow.core.model import Owner
 from moneyflow.storage import db
 from tools.import_old.read import read_accounts, read_categories, read_overrides, read_raw, read_rules
 
@@ -24,8 +25,13 @@ def run(old_repo: Path, conn: psycopg.Connection) -> dict[str, int]:
     print(f"not in source: {len(stale)} stored transactions")
     for tid in stale:
         print(f"  {tid}")
+    # BRIDGE T2-B1: owners built from the accounts' distinct owners, exactly one budget=True;
+    # Task 9 removes it (it reads `owners:` and `budget_owner:` from the old accounts.yaml).
+    owner_ids = sorted({a.owner for a in accounts})
+    owners = tuple(Owner(id=o, display=o, counterparty_strings=(), budget=(i == 0)) for i, o in enumerate(owner_ids))
     counts = db.replace_imported(
         conn,
+        owners=owners,
         accounts=accounts,
         transactions=transactions,
         rules=read_rules(data / "rules.yaml"),

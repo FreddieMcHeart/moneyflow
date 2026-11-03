@@ -5,7 +5,7 @@ from moneyflow.core.model import LedgerEntry
 from moneyflow.core.reports import category_totals as core_totals
 from moneyflow.services import queries
 from moneyflow.storage import db
-from tests.core._builders import account, tx
+from tests.core._builders import account, owner, tx
 
 D1, D2 = date(2026, 1, 1), date(2026, 1, 31)
 
@@ -17,7 +17,7 @@ def _entry(tid, category, subcategory, amount, currency="UAH", day=1, status="ke
 
 def _seed(conn):
     db.replace_imported(
-        conn, accounts=(account(), account("acc_usd", "USD")),
+        conn, owners=(owner(),), accounts=(account(), account("acc_usd", "USD")),
         transactions=(
             tx("t1", description="Latte Shop", day=2), tx("t2", description="bus", day=3),
             tx("t3", description="x", day=4),

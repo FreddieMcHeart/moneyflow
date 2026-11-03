@@ -8,6 +8,14 @@ from typing import Literal
 
 
 @dataclass(frozen=True)
+class Owner:
+    id: str
+    display: str
+    counterparty_strings: tuple[str, ...]
+    budget: bool
+
+
+@dataclass(frozen=True)
 class Account:
     id: str
     name: str
@@ -15,6 +23,7 @@ class Account:
     owner: str
     role: str
     include: bool
+    cash_from: date | None  # non-null marks the cash account and its cutover date
 
 
 @dataclass(frozen=True)
@@ -34,11 +43,11 @@ class Transaction:
 @dataclass(frozen=True)
 class Rule:
     id: str
-    kind: Literal["categorize"]
+    kind: Literal["categorize", "exclude"]
     priority: int
     ordinal: int  # position in the source file
     match: Mapping[str, object]
-    result: Mapping[str, str | None]  # category, subcategory
+    result: Mapping[str, str | bool | None]  # categorize: category, subcategory; exclude: reason, optional paired
     active: bool
     created_by: str
 
@@ -47,8 +56,8 @@ class Rule:
 class Ruling:
     id: str
     transaction_id: str
-    kind: Literal["category"]
-    payload: Mapping[str, str | None]  # category, subcategory, note
+    kind: Literal["category", "exclude", "white_card"]
+    payload: Mapping[str, str | None]  # category: category, subcategory, note; exclude: reason, note; white_card: empty
     created_by: str
 
 
@@ -69,6 +78,7 @@ class LedgerEntry:
 
 @dataclass(frozen=True)
 class Inputs:
+    owners: tuple[Owner, ...]
     accounts: tuple[Account, ...]
     transactions: tuple[Transaction, ...]
     rules: tuple[Rule, ...]

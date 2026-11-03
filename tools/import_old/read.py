@@ -23,6 +23,7 @@ def read_accounts(path: Path) -> tuple[Account, ...]:
         Account(
             id=str(a["id"]), name=str(a["name"]), currency=str(a["currency"]),
             owner=str(a["owner"]), role=str(a["role"]), include=bool(a["include"]),
+            cash_from=None,
         )
         for a in _load(path)["accounts"]
     )

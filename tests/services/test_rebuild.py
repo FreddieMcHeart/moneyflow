@@ -7,12 +7,13 @@ from moneyflow.__main__ import main
 from moneyflow.core.model import BuildRefused, LedgerEntry
 from moneyflow.services.rebuild import rebuild
 from moneyflow.storage import db
-from tests.core._builders import account, rule, ruling, tx
+from tests.core._builders import account, owner, rule, ruling, tx
 
 
 def _seed(conn, rulings=()):
     db.replace_imported(
         conn,
+        owners=(owner(),),
         accounts=(account(),),
         transactions=(tx("t1", description="cafe"), tx("t2", description="other")),
         rules=(replace(rule("r1", 10, 0, "food", None, description_contains="cafe"), created_by="import"),),
@@ -57,7 +58,7 @@ def test_cli_exit_1_on_refusal(conn, db_url, capsys):
 
 def test_cli_exit_1_on_broken_rule_value(conn, db_url, capsys):
     db.replace_imported(
-        conn, accounts=(account(),), transactions=(tx("t1"),),
+        conn, owners=(owner(),), accounts=(account(),), transactions=(tx("t1"),),
         rules=(replace(rule("r1", 10, 0, "food", None, amount_lt="abc"), created_by="import"),),
         rulings=(), categories=("food",),
     )
