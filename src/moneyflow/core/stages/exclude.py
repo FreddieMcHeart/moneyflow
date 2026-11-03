@@ -3,7 +3,7 @@
 from collections.abc import Callable
 from dataclasses import replace
 
-from moneyflow.core.cash import cash
+from moneyflow.core.cash import cash_movements
 from moneyflow.core.cross_owner import coverage, cross_owner
 from moneyflow.core.internal import internal_pairs
 from moneyflow.core.kinds.exclude import apply_rule, apply_ruling
@@ -43,6 +43,12 @@ def _cross_owner(entries: list[LedgerEntry], inputs: Inputs) -> list[LedgerEntry
 
 def _excluded(entry: LedgerEntry, reason: str, decided_by: str) -> LedgerEntry:
     return replace(entry, status="excluded", reason=reason, decided_by=decided_by)
+
+
+def _cash(entries: list[LedgerEntry], inputs: Inputs) -> list[LedgerEntry]:
+    """A5: a withdrawal from the cutover on is a transfer to the cash account, not spending."""
+    reasons = cash_movements(entries, inputs)
+    return [_excluded(e, reasons[e.transaction_id], f"core:{reasons[e.transaction_id]}") if e.transaction_id in reasons else e for e in entries]
 
 
 def _other_owner_income(entries: list[LedgerEntry], inputs: Inputs) -> list[LedgerEntry]:
@@ -108,7 +114,7 @@ def _internal(entries: list[LedgerEntry], inputs: Inputs) -> list[LedgerEntry]:
 
 def exclude(entries: list[LedgerEntry], inputs: Inputs) -> list[LedgerEntry]:
     entries = _exclude_rulings(entries, inputs)
-    entries = cash(entries, inputs)
+    entries = _cash(entries, inputs)
     entries = _cross_owner(entries, inputs)  # A6/A7/A8
     entries = _other_owner_income(entries, inputs)
     entries = _exclude_rules(entries, inputs)
