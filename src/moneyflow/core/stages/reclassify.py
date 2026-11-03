@@ -6,6 +6,7 @@ The steps run in a fixed order; a row a step changed (`via` set) is skipped by t
 from collections.abc import Callable
 from dataclasses import replace
 
+from moneyflow.core.credit import pair_credit
 from moneyflow.core.kinds import cancellation, debt, investment_withdrawal, person_return, reimbursement
 from moneyflow.core.model import BuildRefused, Inputs, LedgerEntry, Rule, Ruling, Transaction
 
@@ -131,7 +132,7 @@ def _investment_withdrawals(entries: list[LedgerEntry], inputs: Inputs) -> list[
     return _by_rule(entries, inputs, "investment_withdrawal", investment_withdrawal.apply_rule, _flip, ruled)
 
 
-STEPS: list[Step] = [_reimbursements, _debts, _cancellations, _person_returns, _investment_withdrawals]
+STEPS: list[Step] = [pair_credit, _reimbursements, _debts, _cancellations, _person_returns, _investment_withdrawals]
 
 
 def reclassify(entries: list[LedgerEntry], inputs: Inputs) -> list[LedgerEntry]:
