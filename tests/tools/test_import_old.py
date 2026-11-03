@@ -1,12 +1,14 @@
 """Synthetic old-repo trees built in tmp_path; no real data."""
 
 import textwrap
+from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
 
 import pytest
 import yaml
 
+from moneyflow.services.rebuild import rebuild
 from moneyflow.storage import db
 from tools.import_old.__main__ import run
 from tools.import_old.read import read_accounts, read_categories, read_overrides, read_raw, read_rules
@@ -15,9 +17,30 @@ _HEADER = "date,time,amount,currency,direction,mcc,description,comment,category,
 _HEADER_UAH = "date,time,amount_uah,direction,mcc,description,comment,category,id"
 
 
-def _accounts_yaml(*accounts: tuple[str, str, bool]) -> str:
+_OWNERS = {"o": {"display": "Owner O", "counterparty_strings": ["o-card", "o-name"]}}
+
+_CASH_SOURCE = """from datetime import date
+
+CASH_CUTOVER = date(2026, 11, 1)
+CASH_ACCOUNT = "cash-test"
+"""
+
+_EXCLUSIONS_SOURCE = """import re
+
+_CASHBACK = re.compile(r"(кешбек|кешбэк|округленн?я\\s+балансу)", re.IGNORECASE)
+_CREDIT_DRAWDOWN = re.compile(
+    r"розстрочка\\s+на\\s+картку|кредит\\s+до\\s+завтра|кредит\\s+готівкою", re.IGNORECASE)
+_EXCEPTED_INSTALMENT_IDS = frozenset({"inst-1"})
+_INSTALMENT_DRAWDOWN = re.compile(r"розстрочка\\s+на\\s+картку", re.IGNORECASE)
+_MILES = re.compile(r"виведення\\s+миль", re.IGNORECASE)
+"""
+
+
+def _accounts_yaml(*accounts: tuple[str, str, bool], owners: dict | None = None, budget_owner: str = "o") -> str:
     return yaml.safe_dump(
         {
+            "budget_owner": budget_owner,
+            "owners": owners or _OWNERS,
             "accounts": [
                 {"id": i, "name": f"name-{i}", "currency": c, "owner": "o", "role": "spending", "include": inc}
                 for i, c, inc in accounts
@@ -37,15 +60,23 @@ def _old_repo(
     rules: list | None = None,
     overrides: dict | None = None,
     files: dict[str, str] | None = None,
+    owners: dict | None = None,
+    budget_owner: str = "o",
+    manual: dict | None = None,
+    exclusions_source: str = _EXCLUSIONS_SOURCE,
 ) -> Path:
     data = tmp_path / "old" / "data"
     (data / "monobank_import" / "categorized").mkdir(parents=True)
-    (data / "accounts.yaml").write_text(_accounts_yaml(*accounts))
+    finance = tmp_path / "old" / "scripts" / "python" / "finance"
+    finance.mkdir(parents=True)
+    (finance / "cash.py").write_text(_CASH_SOURCE)
+    (finance / "exclusions.py").write_text(exclusions_source)
+    (data / "accounts.yaml").write_text(_accounts_yaml(*accounts, owners=owners, budget_owner=budget_owner))
     (data / "categories.yaml").write_text(
         yaml.safe_dump({"categories": [{"name": "food"}, {"name": "misc"}]})
     )
     (data / "rules.yaml").write_text(yaml.safe_dump({"rules": rules or []}))
-    (data / "manual.yaml").write_text(yaml.safe_dump({"overrides": overrides or {}}))
+    (data / "manual.yaml").write_text(yaml.safe_dump({"overrides": overrides or {}, **(manual or {})}))
     for name, body in (files or {}).items():
         (data / "monobank_import" / name).write_text(body)
     return tmp_path / "old"
@@ -213,7 +244,7 @@ def test_reimport_is_idempotent_and_keeps_non_import_rows(conn, tmp_path):
         " values ('op1', 't1', 'category', '{\"category\": \"misc\", \"subcategory\": null}', 'operator')"
     )
     second = run(repo, conn)
-    assert first == {"accounts": 1, "transactions": 2, "rules": 1, "rulings": 2, "categories": 2}
+    assert first == {"owners": 1, "accounts": 1, "transactions": 2, "rules": 8, "rulings": 2, "categories": 2}
     assert second == {**first, "rulings": 3}
     assert {r.id for r in db.load_inputs(conn).rulings} == {"override:t1", "override:t2", "op1"}
 
@@ -228,3 +259,209 @@ def test_stored_transaction_gone_from_source_is_reported_not_deleted(conn, tmp_p
     assert "not in source: 1 stored transactions\n  t2\n" in out
     assert counts["transactions"] == 2
     assert [t.id for t in db.load_inputs(conn).transactions] == ["t1", "t2"]
+
+
+def test_stale_transaction_ruling_survives_import_cli(conn, tmp_path):
+    repo = _db_repo(tmp_path)
+    run(repo, conn)
+    (repo / "data" / "monobank_import" / "acc1_2026-01-01_2026-01-31.csv").write_text(_csv(_row("t2", "3.00", "income")))
+    run(repo, conn)
+    assert {r.id for r in db.load_inputs(conn).rulings} == {"override:t1", "override:t2"}
+
+
+def _times(tmp_path, time: str):
+    row = f"2026-01-05,{time},10.50,UAH,expense,5411,shop,note,,t1"
+    repo = _old_repo(tmp_path, files={"acc1_2026-01-01_2026-01-31.csv": _csv(row)})
+    return read_raw(repo / "data" / "monobank_import", read_accounts(repo / "data" / "accounts.yaml"))
+
+
+def test_naive_time_read_as_utc(tmp_path):
+    (naive,) = _times(tmp_path / "n", "2026-01-05T12:00:00")
+    (aware,) = _times(tmp_path / "a", "2026-01-05T14:00:00+02:00")
+    assert naive.time == aware.time == datetime(2026, 1, 5, 12, 0, 0)
+
+
+def test_unparsable_time_refuses(tmp_path):
+    with pytest.raises(ValueError):
+        _times(tmp_path, "not a time")
+
+
+def _by_id(conn, kind: str) -> dict:
+    inputs = db.load_inputs(conn)
+    return {x.id: x for x in (inputs.rulings if kind == "rulings" else inputs.rules)}
+
+
+def test_imports_owners_and_budget_owner(conn, tmp_path):
+    owners = {
+        "o": {"display": "Owner O", "counterparty_strings": ["o-card"]},
+        "p": {"display": "Owner P", "counterparty_strings": ["p-card", "p-name"]},
+    }
+    repo = _old_repo(
+        tmp_path, accounts=(("acc1", "UAH", True),), owners=owners, budget_owner="p",
+        files={"acc1_2026-01-01_2026-01-31.csv": _csv(_row("t1"))},
+    )
+    run(repo, conn)
+    stored = {o.id: o for o in db.load_inputs(conn).owners}
+    assert [(o.id, o.display, o.counterparty_strings, o.budget) for o in stored.values()] == [
+        ("o", "Owner O", ("o-card",), False),
+        ("p", "Owner P", ("p-card", "p-name"), True),
+    ]
+
+
+def test_imports_cash_from(conn, tmp_path):
+    repo = _old_repo(
+        tmp_path, accounts=(("acc1", "UAH", True), ("cash-test", "UAH", True)),
+        files={"acc1_2026-01-01_2026-01-31.csv": _csv(_row("t1"))},
+    )
+    run(repo, conn)
+    assert {a.id: a.cash_from for a in db.load_inputs(conn).accounts} == {
+        "acc1": None, "cash-test": date(2026, 11, 1),
+    }
+
+
+def _manual_repo(tmp_path, *, overrides=None, manual=None, rows=("t1", "t2", "t3")):
+    return _old_repo(
+        tmp_path, overrides=overrides, manual=manual,
+        files={"acc1_2026-01-01_2026-01-31.csv": _csv(*(_row(t) for t in rows))},
+    )
+
+
+def test_imports_unpaired_and_white_card_rulings(conn, tmp_path):
+    repo = _manual_repo(
+        tmp_path,
+        overrides={"t3": {"category": "food", "note": "n"}},
+        manual={"unpaired_transfers": {"t1": "note a"}, "unpaired_internal": {"t2": "note b"}, "white_card_spending": {"t3": "wc"}},
+    )
+    run(repo, conn)
+    rulings = _by_id(conn, "rulings")
+    assert rulings["exclude:cross-owner-unpaired:t1"].payload == {"reason": "cross-owner-unpaired", "note": "note a"}
+    assert rulings["exclude:internal-transfer:t2"].payload == {"reason": "internal-transfer", "note": "note b"}
+    assert (rulings["white_card:t3"].kind, dict(rulings["white_card:t3"].payload)) == ("white_card", {})
+
+
+def test_white_card_with_override_gets_both_rulings_with_distinct_ids(conn, tmp_path):
+    repo = _manual_repo(
+        tmp_path, overrides={"t1": {"category": "food", "note": "n"}}, manual={"white_card_spending": {"t1": "wc"}}
+    )
+    run(repo, conn)
+    stored = [(g.id, g.kind) for g in db.load_inputs(conn).rulings if g.transaction_id == "t1"]
+    assert sorted(stored) == [("override:t1", "category"), ("white_card:t1", "white_card")]
+
+
+_SPLIT = {"t1": {"note": "n", "parts": [{"amount": "2.00", "category": "food", "subcategory": "sub"}]}}
+
+
+def test_white_card_split_without_override_gets_split_pending_ruling(conn, tmp_path, capsys):
+    repo = _manual_repo(tmp_path, manual={"white_card_spending": {"t1": "wc"}, "splits": _SPLIT})
+    run(repo, conn)
+    rulings = _by_id(conn, "rulings")
+    pending = rulings["split_pending:t1"]
+    assert (pending.kind, pending.payload["category"], pending.payload["subcategory"]) == ("category", "food", "sub")
+    assert "split-pending" in str(pending.payload["note"])
+    assert "imported split_pending rulings: 1" in capsys.readouterr().out
+
+
+def test_split_pending_leg_passes_a4_in_rebuild(conn, tmp_path):
+    owners = {
+        "o": {"display": "Owner O", "counterparty_strings": ["o-name"]},
+        "p": {"display": "Owner P", "counterparty_strings": ["p-name"]},
+    }
+    leg = "2026-01-05,2026-01-05T12:00:00+02:00,30.00,UAH,expense,5411,to p-name,,,t1"
+    other = "2026-01-05,2026-01-05T13:00:00+02:00,7.00,UAH,expense,5411,shop,,,t9"
+    repo = _old_repo(
+        tmp_path, accounts=(("acc1", "UAH", True), ("acc2", "UAH", True)), owners=owners,
+        manual={"white_card_spending": {"t1": "wc"}, "splits": _SPLIT},
+        files={"acc1_2026-01-01_2026-01-31.csv": _csv(leg), "acc2_2026-01-01_2026-01-31.csv": _csv(other)},
+    )
+    (repo / "data" / "accounts.yaml").write_text(
+        yaml.safe_dump({
+            "budget_owner": "o", "owners": owners,
+            "accounts": [
+                {"id": "acc1", "name": "n1", "currency": "UAH", "owner": "o", "role": "spending", "include": True},
+                {"id": "acc2", "name": "n2", "currency": "UAH", "owner": "p", "role": "spending", "include": True},
+            ],
+        })
+    )
+    run(repo, conn)
+    entry = next(e for e in rebuild(conn) if e.transaction_id == "t1")
+    assert (entry.status, entry.category, entry.decided_by) == ("kept", "food", "ruling:split_pending:t1")
+
+
+def test_imports_instalment_exception_ruling(conn, tmp_path):
+    repo = _manual_repo(tmp_path, rows=("inst-1", "t2"))
+    run(repo, conn)
+    ruling = _by_id(conn, "rulings")["exclude:credit-drawdown:inst-1"]
+    assert (ruling.kind, ruling.payload["reason"]) == ("exclude", "credit-drawdown")
+
+
+def test_imports_exclude_rules_per_alternative(conn, tmp_path, capsys):
+    run(_manual_repo(tmp_path), conn)
+    rules = {r.id: r for r in db.load_inputs(conn).rules if r.kind == "exclude"}
+    assert sorted((r.id, r.match["description_contains"], r.result["reason"]) for r in rules.values()) == [
+        ("import-exclude-cashback-roundup-1", "кешбек", "cashback-roundup"),
+        ("import-exclude-cashback-roundup-2", "кешбэк", "cashback-roundup"),
+        ("import-exclude-cashback-roundup-3", "округлення балансу", "cashback-roundup"),
+        ("import-exclude-cashback-roundup-4", "округленя балансу", "cashback-roundup"),
+        ("import-exclude-credit-drawdown-1", "кредит до завтра", "credit-drawdown"),
+        ("import-exclude-credit-drawdown-2", "кредит готівкою", "credit-drawdown"),
+        ("import-exclude-miles-to-charity-1", "виведення миль", "miles-to-charity"),
+    ]
+    assert "imported exclude rules: 7" in capsys.readouterr().out
+
+
+def test_instalment_alternative_is_not_a_rule(conn, tmp_path):
+    run(_manual_repo(tmp_path), conn)
+    assert not [r for r in db.load_inputs(conn).rules if "розстрочка" in str(r.match.get("description_contains"))]
+
+
+def test_optional_letter_alternative_expands_to_two_literals(conn, tmp_path):
+    run(_manual_repo(tmp_path), conn)
+    literals = {r.match["description_contains"] for r in db.load_inputs(conn).rules if r.kind == "exclude"}
+    assert {"округлення балансу", "округленя балансу"} <= literals
+    assert not any("?" in str(x) or "\\" in str(x) for x in literals)
+
+
+def test_regex_metacharacter_alternative_refuses(conn, tmp_path):
+    source = _EXCLUSIONS_SOURCE.replace("кешбек|", "кеш.бек|")
+    repo = _old_repo(tmp_path, exclusions_source=source, files={"acc1_2026-01-01_2026-01-31.csv": _csv(_row("t1"))})
+    with pytest.raises(ValueError, match="metacharacter"):
+        run(repo, conn)
+
+
+def test_drawdown_rule_has_direction_income(conn, tmp_path):
+    run(_manual_repo(tmp_path), conn)
+    by_id = _by_id(conn, "rules")
+    assert by_id["import-exclude-credit-drawdown-2"].match == {"description_contains": "кредит готівкою", "direction": "income"}
+    assert by_id["import-exclude-miles-to-charity-1"].match["direction"] == "income"
+    assert by_id["import-exclude-miles-to-charity-1"].result["paired"] is True
+    assert "direction" not in by_id["import-exclude-cashback-roundup-1"].match
+
+
+def test_expense_row_with_drawdown_text_not_excluded_after_import_and_rebuild(conn, tmp_path):
+    drawdown = "2026-01-05,2026-01-05T12:00:00+02:00,{amount},UAH,{direction},5411,кредит готівкою,,,{tid}"
+    repo = _old_repo(
+        tmp_path,
+        files={"acc1_2026-01-01_2026-01-31.csv": _csv(
+            drawdown.format(amount="2000.00", direction="income", tid="in1"),
+            drawdown.format(amount="500.00", direction="expense", tid="ex1"),
+        )},
+    )
+    run(repo, conn)
+    entries = {e.transaction_id: e for e in rebuild(conn)}
+    assert (entries["in1"].status, entries["in1"].reason, entries["in1"].decided_by) == (
+        "excluded", "credit-drawdown", "rule:import-exclude-credit-drawdown-2",
+    )
+    assert entries["ex1"].status != "excluded"
+
+
+def test_reimport_of_exclude_inputs_is_idempotent(conn, tmp_path):
+    repo = _manual_repo(
+        tmp_path,
+        overrides={"t3": {"category": "food", "note": "n"}},
+        manual={"unpaired_transfers": {"t1": "a"}, "white_card_spending": {"t3": "wc"}, "splits": _SPLIT},
+    )
+    first = run(repo, conn)
+    stored = {(g.id, g.kind) for g in db.load_inputs(conn).rulings}
+    second = run(repo, conn)
+    assert second == first
+    assert {(g.id, g.kind) for g in db.load_inputs(conn).rulings} == stored

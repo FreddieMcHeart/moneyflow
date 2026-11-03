@@ -1,13 +1,15 @@
 """Readers for the old repo's data files. Every reader is read-only and builds core model objects."""
 
+import ast
 import csv
+import itertools
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
 
 import yaml
 
-from moneyflow.core.model import Account, Rule, Ruling, Transaction
+from moneyflow.core.model import Account, Owner, Rule, Ruling, Transaction
 
 _DIRECTIONS = ("income", "expense")
 _AMOUNT_KEYS = ("amount_lt", "amount_gte")
@@ -23,6 +25,7 @@ def read_accounts(path: Path) -> tuple[Account, ...]:
         Account(
             id=str(a["id"]), name=str(a["name"]), currency=str(a["currency"]),
             owner=str(a["owner"]), role=str(a["role"]), include=bool(a["include"]),
+            cash_from=None,
         )
         for a in _load(path)["accounts"]
     )
@@ -107,3 +110,161 @@ def read_raw(directory: Path, accounts: tuple[Account, ...]) -> tuple[Transactio
     for tid in differing:
         print(f"  {tid}")
     return tuple(kept.values())
+
+
+def read_owners(path: Path) -> tuple[Owner, ...]:
+    """`owners:` and `budget_owner:` of the old accounts.yaml; exactly one owner gets `budget=True`."""
+    doc = _load(path)
+    owners = doc["owners"]
+    budget = doc.get("budget_owner")
+    if budget not in owners:
+        raise ValueError(f"budget_owner {budget!r} is not a key of owners: in the old accounts.yaml")
+    return tuple(
+        Owner(
+            id=str(key), display=str(o["display"]),
+            counterparty_strings=tuple(str(s) for s in (o.get("counterparty_strings") or ())),
+            budget=key == budget,
+        )
+        for key, o in owners.items()
+    )
+
+
+def _constants(path: Path) -> dict[str, ast.expr]:
+    """Module-level `NAME = <expr>` assignments of an old source file, parsed and never executed."""
+    out: dict[str, ast.expr] = {}
+    for node in ast.parse(Path(path).read_text(encoding="utf-8")).body:
+        if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
+            out[node.targets[0].id] = node.value
+    return out
+
+
+def _constant(constants: dict[str, ast.expr], name: str, path: Path) -> ast.expr:
+    if name not in constants:
+        raise ValueError(f"{name} not found in {Path(path).name} of the old repo")
+    return constants[name]
+
+
+def read_cash(cash_source: Path) -> tuple[str, date]:
+    """The cash account id and its cutover date, read from the old `finance/cash.py` source."""
+    constants = _constants(cash_source)
+    account = ast.literal_eval(_constant(constants, "CASH_ACCOUNT", cash_source))
+    call = _constant(constants, "CASH_CUTOVER", cash_source)
+    if not (isinstance(call, ast.Call) and getattr(call.func, "id", None) == "date"):
+        raise ValueError("CASH_CUTOVER is not a date(...) call in the old cash.py")
+    return str(account), date(*(ast.literal_eval(a) for a in call.args))
+
+
+_REGEX_META = frozenset("\\^$.|?*+()[]{}")
+
+
+def _regex_source(constants: dict[str, ast.expr], name: str, path: Path) -> str:
+    call = _constant(constants, name, path)
+    if not (isinstance(call, ast.Call) and call.args):
+        raise ValueError(f"{name} is not a re.compile(...) call in the old {Path(path).name}")
+    return str(ast.literal_eval(call.args[0]))
+
+
+def _expand_optional(text: str) -> list[str]:
+    """`н?` becomes two literals: the letter present and absent."""
+    out = [""]
+    i = 0
+    while i < len(text):
+        if i + 1 < len(text) and text[i + 1] == "?":
+            out = [prefix + tail for prefix in out for tail in (text[i], "")]
+            i += 2
+        else:
+            out = [prefix + text[i] for prefix in out]
+            i += 1
+    return out
+
+
+def _alternatives(pattern: str) -> list[str]:
+    """One literal per regex alternative; refuses an alternative that still holds a metacharacter."""
+    if pattern.startswith("(") and pattern.endswith(")"):
+        pattern = pattern[1:-1]
+    literals: list[str] = []
+    for alternative in pattern.split("|"):
+        for literal in _expand_optional(alternative.replace("\\s+", " ")):
+            if _REGEX_META & set(literal):
+                raise ValueError(f"regex alternative {alternative!r} holds a regex metacharacter after the swap")
+            literals.append(literal)
+    return literals
+
+
+def read_exclude_rules(exclusions_source: Path) -> tuple[Rule, ...]:
+    """A10, A11 and A14 regexes of the old `finance/exclusions.py`, one `exclude` rule per alternative.
+
+    Note on A10: the old regex read the description only; `description_contains` reads description and
+    comment. 0 live rows differ. No new match key was added for it. The "розстрочка на картку"
+    alternative of A14 never becomes a rule: an instalment drawdown is excluded only through its id (A15).
+    """
+    constants = _constants(exclusions_source)
+    instalment = set(_alternatives(_regex_source(constants, "_INSTALMENT_DRAWDOWN", exclusions_source)))
+    # (constant, reason, income only, needs the expense partner)
+    plan = (
+        ("_MILES", "miles-to-charity", True, True),
+        ("_CASHBACK", "cashback-roundup", False, False),
+        ("_CREDIT_DRAWDOWN", "credit-drawdown", True, False),
+    )
+    rules: list[Rule] = []
+    ordinal = itertools.count()
+    for name, reason, income_only, paired in plan:
+        literals = [lit for lit in _alternatives(_regex_source(constants, name, exclusions_source)) if lit not in instalment]
+        for n, literal in enumerate(literals, start=1):
+            match: dict[str, object] = {"description_contains": literal}
+            if income_only:
+                match["direction"] = "income"
+            result: dict[str, str | bool | None] = {"reason": reason}
+            if paired:
+                result["paired"] = True
+            rules.append(Rule(
+                id=f"import-exclude-{reason}-{n}", kind="exclude", priority=0, ordinal=next(ordinal),
+                match=match, result=result, active=True, created_by="import",
+            ))
+    return tuple(rules)
+
+
+def _notes(path: Path, block: str) -> dict[str, str]:
+    return {str(k): str(v) for k, v in (_load(path).get(block) or {}).items()}
+
+
+def read_exclude_rulings(manual: Path, exclusions_source: Path) -> tuple[Ruling, ...]:
+    """`unpaired_transfers:`, `unpaired_internal:` and the old excepted instalment ids as `exclude` rulings."""
+    constants = _constants(exclusions_source)
+    excepted = ast.literal_eval(_constant(constants, "_EXCEPTED_INSTALMENT_IDS", exclusions_source).args[0])  # type: ignore[attr-defined]
+    sources = (
+        ("cross-owner-unpaired", _notes(manual, "unpaired_transfers")),
+        ("internal-transfer", _notes(manual, "unpaired_internal")),
+        ("credit-drawdown", {str(i): "excepted instalment drawdown (old exclusions.py)" for i in sorted(excepted)}),
+    )
+    return tuple(
+        Ruling(id=f"exclude:{reason}:{tx}", transaction_id=tx, kind="exclude",
+               payload={"reason": reason, "note": note}, created_by="import")
+        for reason, notes in sources for tx, note in notes.items()
+    )
+
+
+def read_white_card_rulings(manual: Path, overrides: tuple[Ruling, ...]) -> tuple[tuple[Ruling, ...], tuple[Ruling, ...]]:
+    """`white_card` rulings, plus a temporary `split_pending` category ruling for a leg with a split and no override.
+
+    0b.2 replaces the placeholder with the split itself (operator ruling 2026-11-03).
+    """
+    doc = _load(manual)
+    overridden = {g.transaction_id for g in overrides}
+    splits = doc.get("splits") or {}
+    white = tuple(
+        Ruling(id=f"white_card:{tx}", transaction_id=str(tx), kind="white_card", payload={}, created_by="import")
+        for tx in (doc.get("white_card_spending") or {})
+    )
+    pending = []
+    for g in white:
+        tx = g.transaction_id
+        if tx in splits and tx not in overridden:
+            first = splits[tx]["parts"][0]
+            pending.append(Ruling(
+                id=f"split_pending:{tx}", transaction_id=tx, kind="category",
+                payload={"category": first["category"], "subcategory": first.get("subcategory"),
+                         "note": "split-pending: temporary until the split is applied (0b.2)"},
+                created_by="import",
+            ))
+    return white, tuple(pending)

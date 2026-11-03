@@ -2,6 +2,7 @@ import pytest
 
 from moneyflow.core.build import build
 from moneyflow.core.model import BuildRefused
+from moneyflow.core.stages.categorize import categorize
 from tests.core._builders import inputs, rule, ruling, tx
 
 
@@ -100,3 +101,35 @@ def test_broken_rule_value_refuses_naming_the_rule():
 def test_empty_match_rule_refuses():
     with pytest.raises(BuildRefused, match="rule r0: empty match"):
         build(inputs(transactions=(tx(),), rules=(rule("r0", 10, 0, "food"),)))
+
+
+def test_categorize_ignores_non_category_rulings():
+    # Driven stage by stage: a white_card ruling on a plain row is refused by the A8 audit in the full
+    # build (T4), and this test is about categorize alone.
+    from moneyflow.core.stages.exclude import _exclude_rulings
+    from moneyflow.core.stages.ingest import ingest
+    from tests.core._builders import exclude_ruling, white_card_ruling
+
+    rulings = (exclude_ruling("x1", "t2", "cash-withdrawal"), white_card_ruling("w1", "t1"), ruling("g0", "t1", "food"))
+    inp = inputs(transactions=(tx("t1"), tx("t2")), rulings=rulings)
+    by_id = {e.transaction_id: e for e in categorize(_exclude_rulings(ingest([], inp), inp), inp)}
+    assert (by_id["t1"].status, by_id["t1"].category) == ("kept", "food")
+    assert by_id["t2"].status == "excluded" and by_id["t2"].reason == "cash-withdrawal"
+
+
+def test_category_and_white_card_ruling_on_one_leg_do_not_refuse():
+    from moneyflow.core.stages.ingest import ingest
+    from tests.core._builders import white_card_ruling
+
+    rulings = (ruling("g1", "t1", "food"), white_card_ruling("w1", "t1"))
+    inp = inputs(transactions=(tx(),), rulings=rulings)
+    (e,) = categorize(ingest([], inp), inp)
+    assert (e.status, e.category, e.decided_by) == ("kept", "food", "ruling:g1")
+
+
+def test_category_ruling_on_excluded_entry_still_refuses():
+    from tests.core._builders import exclude_ruling
+
+    rulings = (exclude_ruling("x1", "t1", "cash-withdrawal"), ruling("g1", "t1", "food"))
+    with pytest.raises(BuildRefused, match="ruling on an excluded entry"):
+        build(inputs(transactions=(tx(),), rulings=rulings))

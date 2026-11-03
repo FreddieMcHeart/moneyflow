@@ -44,7 +44,7 @@ def _repo(tmp_path):
 
 def test_import_rebuild_query_mcp(conn, db_url, tmp_path):
     counts = run(_repo(tmp_path), conn)
-    assert counts == {"accounts": 2, "transactions": 5, "rules": 2, "rulings": 1, "categories": 2}
+    assert counts == {"owners": 1, "accounts": 2, "transactions": 5, "rules": 9, "rulings": 1, "categories": 2}
 
     ledger = rebuild(conn)
     assert sorted((e.transaction_id, e.status, e.category, e.subcategory, e.amount, e.currency) for e in ledger) == [

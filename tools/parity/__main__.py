@@ -7,7 +7,7 @@ from pathlib import Path
 import yaml
 
 from moneyflow.storage import db
-from tools.parity.compare import ParityResult, compare
+from tools.parity.compare import ExcludedParityResult, ParityResult, compare, compare_excluded
 
 
 def _read_csv(path: Path) -> list[dict[str, str]]:
@@ -28,9 +28,51 @@ def _rule_names(data: Path) -> set[str]:
         return {str(r["name"]) for r in yaml.safe_load(handle)["rules"]}
 
 
-def exit_code(result: ParityResult) -> int:
+def exit_code(result: ParityResult, excluded: ExcludedParityResult) -> int:
     clean = not result.differ and not result.missing
-    return 0 if clean and result.population > 0 and result.compared > 0 else 1
+    ok = clean and result.population > 0 and result.compared > 0
+    return 0 if ok and excluded_clean(excluded) else 1
+
+
+def excluded_clean(r: ExcludedParityResult) -> bool:
+    problems = (r.differ, r.old_kept_excluded, r.next_slice_excluded, r.split_pending_excluded, r.not_included_mismatch)
+    return r.compared > 0 and not any(problems)
+
+
+def _split_pending_ids(inputs) -> set[str]:
+    return {g.transaction_id for g in inputs.rulings if g.id.startswith("split_pending:")}
+
+
+def _not_included_ids(inputs) -> set[str]:
+    off = {a.id for a in inputs.accounts if not a.include}
+    return {t.id for t in inputs.transactions if t.account_id in off}
+
+
+def _tally(pairs: list[tuple[str, ...]], key) -> dict[tuple[str, ...], int]:
+    out: dict[tuple[str, ...], int] = {}
+    for row in pairs:
+        out[key(row)] = out.get(key(row), 0) + 1
+    return out
+
+
+def report_excluded(r: ExcludedParityResult) -> None:
+    print(f"excluded population: {r.population}")
+    print(f"excluded compared: {r.compared}")
+    print(f"excluded differ: {len(r.differ)}")
+    for reason, n in sorted(_tally(r.differ, lambda d: (d[1],)).items()):
+        print(f"  by old reason {reason[0]}: {n}")
+    for (old, new), n in sorted(_tally(r.differ, lambda d: (d[1], d[2])).items()):
+        print(f"  by pair {old} -> {new}: {n}")
+    print(f"old kept (raw minus old excluded): {r.old_kept}")
+    print(f"old kept but new excluded: {len(r.old_kept_excluded)}")
+    for (reason,), n in sorted(_tally(r.old_kept_excluded, lambda d: (d[1],)).items()):
+        print(f"  by new reason {reason}: {n}")
+    print(f"next slice (old rows): {dict(sorted(r.next_slice.items()))}")
+    print(f"next slice ids excluded in new: {len(r.next_slice_excluded)}")
+    print(f"derived ids (with #): {r.derived}")
+    print(f"split pending (kept bucket): {r.split_pending}")
+    print(f"split pending excluded in new: {len(r.split_pending_excluded)}")
+    print(f"account-not-included mismatch: {len(r.not_included_mismatch)}")
 
 
 def report(result: ParityResult) -> None:
@@ -51,9 +93,15 @@ def main(argv: list[str] | None = None) -> None:
     data = args.old_repo / "data"
     with db.connect(args.db) as conn:
         new = db.load_ledger(conn)
-    result = compare(_old_ledger(data), _rule_names(data), _raw_ids(data), new)
+        inputs = db.load_inputs(conn)
+    raw = _raw_ids(data)
+    result = compare(_old_ledger(data), _rule_names(data), raw, new)
+    excluded = compare_excluded(
+        _read_csv(data / "excluded.csv"), raw, new, _not_included_ids(inputs), _split_pending_ids(inputs)
+    )
     report(result)
-    raise SystemExit(exit_code(result))
+    report_excluded(excluded)
+    raise SystemExit(exit_code(result, excluded))
 
 
 if __name__ == "__main__":

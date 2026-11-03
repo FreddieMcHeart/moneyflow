@@ -10,9 +10,9 @@ from alembic.config import Config
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
-from moneyflow.core.model import Account, Inputs, Ledger, LedgerEntry, Rule, Ruling, Transaction
+from moneyflow.core.model import Account, Inputs, Ledger, LedgerEntry, Owner, Rule, Ruling, Transaction
 
-_TABLES = ("accounts", "transactions", "rules", "rulings", "categories")
+_TABLES = ("owners", "accounts", "transactions", "rules", "rulings", "categories")
 _ALEMBIC_INI = Path(__file__).resolve().parents[3] / "alembic.ini"
 
 
@@ -31,8 +31,12 @@ def _naive_utc(value):
     return value.astimezone(UTC).replace(tzinfo=None)
 
 
+def _owner(r: dict) -> Owner:
+    return Owner(r["id"], r["display"], tuple(r["counterparty_strings"]), r["budget"])
+
+
 def _account(r: dict) -> Account:
-    return Account(r["id"], r["name"], r["currency"], r["owner"], r["role"], r["include"])
+    return Account(r["id"], r["name"], r["currency"], r["owner"], r["role"], r["include"], r["cash_from"])
 
 
 def _transaction(r: dict) -> Transaction:
@@ -67,6 +71,7 @@ def load_inputs(conn: psycopg.Connection) -> Inputs:
     with conn.transaction():
         conn.execute("set transaction isolation level repeatable read")
         return Inputs(
+            owners=tuple(_owner(r) for r in _rows(conn, "select * from owners order by id")),
             accounts=tuple(_account(r) for r in _rows(conn, "select * from accounts order by id")),
             transactions=tuple(_transaction(r) for r in _rows(conn, "select * from transactions order by id")),
             rules=tuple(
@@ -111,13 +116,28 @@ def _insert_many(conn: psycopg.Connection, sql: str, rows: Iterable[tuple]) -> N
         cur.executemany(sql, list(rows))
 
 
-def _upsert_facts(conn: psycopg.Connection, accounts: Iterable[Account], transactions: Iterable[Transaction]) -> None:
+def _upsert_facts(
+    conn: psycopg.Connection,
+    owners: Iterable[Owner],
+    accounts: Iterable[Account],
+    transactions: Iterable[Transaction],
+) -> None:
+    owners = tuple(owners)
+    # Demote first so a changed budget owner never trips the one-budget-owner index mid-upsert.
+    conn.execute("update owners set budget = false")
     _insert_many(
         conn,
-        "insert into accounts (id, name, currency, owner, role, include) values (%s,%s,%s,%s,%s,%s)"
+        "insert into owners (id, display, counterparty_strings, budget) values (%s,%s,%s,%s)"
+        " on conflict (id) do update set display=excluded.display,"
+        " counterparty_strings=excluded.counterparty_strings, budget=excluded.budget",
+        ((o.id, o.display, list(o.counterparty_strings), o.budget) for o in owners),
+    )
+    _insert_many(
+        conn,
+        "insert into accounts (id, name, currency, owner, role, include, cash_from) values (%s,%s,%s,%s,%s,%s,%s)"
         " on conflict (id) do update set name=excluded.name, currency=excluded.currency,"
-        " owner=excluded.owner, role=excluded.role, include=excluded.include",
-        ((a.id, a.name, a.currency, a.owner, a.role, a.include) for a in accounts),
+        " owner=excluded.owner, role=excluded.role, include=excluded.include, cash_from=excluded.cash_from",
+        ((a.id, a.name, a.currency, a.owner, a.role, a.include, a.cash_from) for a in accounts),
     )
     _insert_many(
         conn,
@@ -133,9 +153,18 @@ def _upsert_facts(conn: psycopg.Connection, accounts: Iterable[Account], transac
 
 
 def _replace_decisions(
-    conn: psycopg.Connection, rules: Iterable[Rule], rulings: Iterable[Ruling], categories: Iterable[str]
+    conn: psycopg.Connection,
+    rules: Iterable[Rule],
+    rulings: Iterable[Ruling],
+    categories: Iterable[str],
+    transaction_ids: list[str],
 ) -> None:
-    for table in ("rulings", "rules", "categories"):
+    # An import ruling on a transaction missing from the source (stale) is kept: it is still that
+    # transaction's decision. Rules and categories are replaced whole, as before.
+    conn.execute(
+        "delete from rulings where created_by = 'import' and transaction_id = any(%s)", (transaction_ids,)
+    )
+    for table in ("rules", "categories"):
         conn.execute(f"delete from {table} where created_by = 'import'")  # type: ignore[arg-type]
     _insert_many(
         conn,
@@ -159,14 +188,21 @@ def _replace_decisions(
 def replace_imported(
     conn: psycopg.Connection,
     *,
+    owners: Iterable[Owner],
     accounts: Iterable[Account],
     transactions: Iterable[Transaction],
     rules: Iterable[Rule],
     rulings: Iterable[Ruling],
     categories: Iterable[str],
 ) -> dict[str, int]:
-    """One transaction: upsert facts by id, replace the `import` decision rows, return counts per table."""
+    """One transaction: upsert facts by id, replace the `import` decision rows, return counts per table.
+
+    An import ruling whose transaction is not among the incoming `transactions` survives the
+    re-import. Such a ruling can name a category that a later `categories.yaml` drops; `categorize`
+    then refuses `unknown category` (0 occurrences today).
+    """
+    transactions = tuple(transactions)
     with conn.transaction():
-        _upsert_facts(conn, accounts, transactions)
-        _replace_decisions(conn, rules, rulings, categories)
+        _upsert_facts(conn, owners, accounts, transactions)
+        _replace_decisions(conn, rules, rulings, categories, [t.id for t in transactions])
         return {t: _rows(conn, f"select count(*) as n from {t}")[0]["n"] for t in _TABLES}  # type: ignore[arg-type]

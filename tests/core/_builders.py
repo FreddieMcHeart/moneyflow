@@ -3,11 +3,15 @@
 from datetime import date, datetime
 from decimal import Decimal
 
-from moneyflow.core.model import Account, Inputs, Rule, Ruling, Transaction
+from moneyflow.core.model import Account, Inputs, Owner, Rule, Ruling, Transaction
 
 
 def account(id: str = "acc1", currency: str = "UAH", include: bool = True) -> Account:
-    return Account(id=id, name=id, currency=currency, owner="o", role="main", include=include)
+    return Account(id=id, name=id, currency=currency, owner="o", role="main", include=include, cash_from=None)
+
+
+def owner(id: str = "o", budget: bool = True, counterparty_strings: tuple[str, ...] = ()) -> Owner:
+    return Owner(id=id, display=id, counterparty_strings=counterparty_strings, budget=budget)
 
 
 def tx(
@@ -56,14 +60,24 @@ def ruling(id: str, transaction_id: str, category: str, subcategory: str | None 
     )
 
 
+def exclude_ruling(id: str, transaction_id: str, reason: str) -> Ruling:
+    return Ruling(id=id, transaction_id=transaction_id, kind="exclude", payload={"reason": reason, "note": None}, created_by="test")
+
+
+def white_card_ruling(id: str, transaction_id: str) -> Ruling:
+    return Ruling(id=id, transaction_id=transaction_id, kind="white_card", payload={}, created_by="test")
+
+
 def inputs(
     transactions: tuple[Transaction, ...] = (),
     rules: tuple[Rule, ...] = (),
     rulings: tuple[Ruling, ...] = (),
     accounts: tuple[Account, ...] = (),
     categories: frozenset[str] = frozenset({"food", "misc"}),
+    owners: tuple[Owner, ...] = (),
 ) -> Inputs:
     return Inputs(
+        owners=owners or (owner(),),
         accounts=accounts or (account(),),
         transactions=transactions,
         rules=rules,
