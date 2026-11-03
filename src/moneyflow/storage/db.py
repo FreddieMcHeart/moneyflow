@@ -152,6 +152,27 @@ def _upsert_facts(
     )
 
 
+class ImportCollision(Exception):
+    """An incoming import ruling reuses the id of a ruling the operator created."""
+
+    def __init__(self, ruling_id: str) -> None:
+        super().__init__(f"import ruling {ruling_id!r} collides with an operator ruling of the same id")
+        self.ruling_id = ruling_id
+
+
+def _refuse_operator_collision(conn: psycopg.Connection, rulings: tuple[Ruling, ...]) -> None:
+    held = {
+        r["id"]
+        for r in conn.execute(
+            "select id from rulings where created_by <> 'import' and id = any(%s)",
+            ([g.id for g in rulings],),
+        ).fetchall()
+    }
+    for g in rulings:
+        if g.id in held:
+            raise ImportCollision(g.id)
+
+
 def _replace_decisions(
     conn: psycopg.Connection,
     rules: Iterable[Rule],
@@ -159,6 +180,8 @@ def _replace_decisions(
     categories: Iterable[str],
     transaction_ids: list[str],
 ) -> None:
+    rulings = tuple(rulings)
+    _refuse_operator_collision(conn, rulings)
     # An import ruling on a transaction missing from the source (stale) is kept: it is still that
     # transaction's decision. Rules and categories are replaced whole, as before.
     conn.execute(

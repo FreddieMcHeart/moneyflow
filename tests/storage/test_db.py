@@ -1,14 +1,12 @@
 from dataclasses import replace
+from datetime import date
 from decimal import Decimal
 
 import psycopg
 import pytest
 
-from moneyflow.core.model import LedgerEntry
+from moneyflow.core.model import LedgerEntry, Ruling
 from moneyflow.storage import db
-from datetime import date
-
-from moneyflow.core.model import Ruling
 from tests.core._builders import account, owner, rule, ruling, tx
 
 
@@ -177,3 +175,17 @@ def test_exclude_rule_and_ruling_kinds_round_trip(conn):
 def test_account_with_unknown_owner_is_rejected_by_db(conn):
     with pytest.raises(psycopg.errors.ForeignKeyViolation):
         _replace(conn, (owner("a"),), (replace(account(), owner="ghost"),))
+
+
+def test_reimport_with_ruling_id_held_by_operator_raises_import_collision(conn):
+    t1 = tx("t1")
+    _write(conn, transactions=(t1,))
+    conn.execute(
+        "insert into rulings (id, transaction_id, kind, payload, created_by)"
+        " values ('override:t1', 't1', 'category', '{\"category\": \"misc\", \"subcategory\": null}', 'operator')"
+    )
+    with pytest.raises(db.ImportCollision) as err:
+        _write(conn, transactions=(t1,), rulings=(ruling("override:t1", "t1", "food"),))
+    assert err.value.ruling_id == "override:t1"
+    rows = conn.execute("select id, created_by from rulings").fetchall()
+    assert [(r["id"], r["created_by"]) for r in rows] == [("override:t1", "operator")]
