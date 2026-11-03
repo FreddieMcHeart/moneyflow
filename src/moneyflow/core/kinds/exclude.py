@@ -2,6 +2,7 @@
 
 from collections.abc import Callable
 
+from moneyflow.core.match import matches
 from moneyflow.core.model import Rule, Ruling, Transaction
 
 
@@ -12,5 +13,11 @@ def apply_ruling(ruling: Ruling) -> str:
 
 
 def apply_rule(rule: Rule, tx: Transaction, partner_lookup: Callable[[Transaction], Transaction | None]) -> str | None:
-    """Slot for the A10/A11/A14 exclude rules; Task 5 replaces it. Excludes nothing yet."""
-    return None
+    """The reason when the rule matches `tx`, else None. A `paired` rule also needs a partner."""
+    if not matches(rule.match, tx):
+        return None
+    if rule.result.get("paired") and partner_lookup(tx) is None:
+        return None
+    reason = rule.result["reason"]
+    assert isinstance(reason, str)
+    return reason
