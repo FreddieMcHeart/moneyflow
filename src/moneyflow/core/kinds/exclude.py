@@ -2,14 +2,13 @@
 
 from collections.abc import Callable
 
+from moneyflow.core.kinds._fields import _text
 from moneyflow.core.match import matches
 from moneyflow.core.model import Rule, Ruling, Transaction
 
 
 def apply_ruling(ruling: Ruling) -> str:
-    reason = ruling.payload["reason"]
-    assert reason is not None
-    return reason
+    return _text(ruling.payload, "reason", f"exclude ruling {ruling.id}", ruling.transaction_id)
 
 
 def apply_rule(rule: Rule, tx: Transaction, partner_lookup: Callable[[Transaction], Transaction | None]) -> str | None:
@@ -18,6 +17,4 @@ def apply_rule(rule: Rule, tx: Transaction, partner_lookup: Callable[[Transactio
         return None
     if rule.result.get("paired") and partner_lookup(tx) is None:
         return None
-    reason = rule.result["reason"]
-    assert isinstance(reason, str)
-    return reason
+    return _text(rule.result, "reason", f"exclude rule {rule.id}", tx.id)

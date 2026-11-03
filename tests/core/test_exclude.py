@@ -25,3 +25,13 @@ def test_exclude_ruling_on_not_included_account_refuses():
     with pytest.raises(BuildRefused, match="exclude ruling on an excluded entry") as refused:
         build(inp)
     assert refused.value.transaction_id == "t1"
+
+
+def test_two_exclude_rulings_on_one_entry_refuse():
+    inp = inputs(
+        transactions=(tx(),),
+        rulings=(exclude_ruling("x1", "t1", "cash-withdrawal"), exclude_ruling("x2", "t1", "other")),
+    )
+    with pytest.raises(BuildRefused, match="more than one exclude ruling") as refused:
+        build(inp)
+    assert refused.value.transaction_id == "t1"
