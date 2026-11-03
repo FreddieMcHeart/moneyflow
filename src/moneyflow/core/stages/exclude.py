@@ -76,7 +76,10 @@ def _partner(tx: Transaction, inputs: Inputs, state: dict[str, LedgerEntry]) -> 
 
 def _first_match(tx: Transaction, rules: list[Rule], partner: Callable[[Transaction], Transaction | None]) -> tuple[Rule, str] | None:
     for rule in rules:
-        reason = apply_rule(rule, tx, partner)
+        try:
+            reason = apply_rule(rule, tx, partner)
+        except (ValueError, ArithmeticError) as broken:  # decimal.InvalidOperation is an ArithmeticError
+            raise BuildRefused(f"rule {rule.id}: {broken}", tx.id) from broken
         if reason is not None:
             return rule, reason
     return None

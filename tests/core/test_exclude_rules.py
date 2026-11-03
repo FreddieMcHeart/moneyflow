@@ -4,7 +4,9 @@ from dataclasses import replace
 from datetime import date, datetime
 from decimal import Decimal
 
-from moneyflow.core.model import Account, Owner, Rule, Transaction
+import pytest
+
+from moneyflow.core.model import Account, BuildRefused, Owner, Rule, Transaction
 from moneyflow.core.stages.exclude import exclude
 from moneyflow.core.stages.ingest import ingest
 from tests.core._builders import exclude_ruling, inputs
@@ -200,3 +202,14 @@ def test_inactive_and_categorize_rules_are_ignored():
 def test_rules_leave_other_rows_alone():
     got = run(row("a", "his", "кешбек"), row("b", "his", "shop"), rules=(CASHBACK,))
     assert got["b"].status == "unresolved"
+
+
+@pytest.mark.parametrize(
+    "match, message",
+    [({}, "rule bad: empty match"), ({"no_such_key": "x"}, "rule bad: unknown match key"), ({"amount_lt": "abc"}, "rule bad")],
+)
+def test_broken_exclude_rule_refuses_naming_the_rule(match, message):
+    bad = rule("bad", "x", **match)
+    with pytest.raises(BuildRefused, match=message) as refused:
+        run(row("a", "his"), rules=(bad,))
+    assert refused.value.transaction_id == "a"
