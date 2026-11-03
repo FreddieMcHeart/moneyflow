@@ -4,6 +4,7 @@ from moneyflow.core.build import STAGES, build
 from moneyflow.core.model import BuildRefused
 from moneyflow.core.stages.arithmetic import arithmetic
 from moneyflow.core.stages.categorize import categorize
+from moneyflow.core.stages.exclude import exclude
 from moneyflow.core.stages.ingest import ingest
 from tests.core._builders import inputs, ruling, tx
 
@@ -23,4 +24,4 @@ def test_build_is_deterministic():
 
 
 def test_stage_order():
-    assert STAGES == [ingest, categorize, arithmetic]
+    assert STAGES == [ingest, exclude, categorize, arithmetic]

@@ -60,6 +60,14 @@ def ruling(id: str, transaction_id: str, category: str, subcategory: str | None 
     )
 
 
+def exclude_ruling(id: str, transaction_id: str, reason: str) -> Ruling:
+    return Ruling(id=id, transaction_id=transaction_id, kind="exclude", payload={"reason": reason, "note": None}, created_by="test")
+
+
+def white_card_ruling(id: str, transaction_id: str) -> Ruling:
+    return Ruling(id=id, transaction_id=transaction_id, kind="white_card", payload={}, created_by="test")
+
+
 def inputs(
     transactions: tuple[Transaction, ...] = (),
     rules: tuple[Rule, ...] = (),

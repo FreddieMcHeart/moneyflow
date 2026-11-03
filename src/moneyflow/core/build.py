@@ -5,11 +5,12 @@ from collections.abc import Callable
 from moneyflow.core.model import BuildRefused, Inputs, Ledger, LedgerEntry
 from moneyflow.core.stages.arithmetic import arithmetic
 from moneyflow.core.stages.categorize import categorize
+from moneyflow.core.stages.exclude import exclude
 from moneyflow.core.stages.ingest import ingest
 
 Stage = Callable[[list[LedgerEntry], Inputs], list[LedgerEntry]]
 
-STAGES: list[Stage] = [ingest, categorize, arithmetic]
+STAGES: list[Stage] = [ingest, exclude, categorize, arithmetic]
 
 
 def build(inputs: Inputs) -> Ledger:

@@ -10,7 +10,7 @@ Decision = tuple[str, str | None, str]  # category, subcategory, decided_by
 
 def _ruling_decisions(inputs: Inputs) -> dict[str, Decision]:
     out: dict[str, Decision] = {}
-    for ruling in inputs.rulings:
+    for ruling in (r for r in inputs.rulings if r.kind == "category"):
         if ruling.transaction_id in out:
             raise BuildRefused("more than one ruling", ruling.transaction_id)
         category, subcategory = apply_ruling(ruling)
