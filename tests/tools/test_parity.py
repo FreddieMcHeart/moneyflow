@@ -98,3 +98,92 @@ def test_exit_code_nonzero_on_differ():
     assert exit_code(_result(differ=[("a", "category")])) != 0
     assert exit_code(_result(missing=["a"])) != 0
     assert exit_code(_result()) == 0
+
+
+# --- excluded rows (Task 10) ---
+
+from tools.parity.compare import compare_excluded  # noqa: E402
+
+
+def _oex(tid, reason="internal-transfer"):
+    return {"id": tid, "rule": f"excluded:{reason}"}
+
+
+def _nex(tid, reason="internal-transfer", status="excluded"):
+    return LedgerEntry(
+        tid, 0, date(2026, 1, 5), "acc1", None, None, Decimal("-1.00"), "UAH",
+        status, reason if status == "excluded" else None, f"core:{reason}",
+    )
+
+
+def _cx(old, new, raw, not_included=(), pending=()):
+    return compare_excluded(old, set(raw), tuple(new), set(not_included), set(pending))
+
+
+def test_excluded_same_reason_passes():
+    r = _cx([_oex("a")], [_nex("a")], {"a", "k"})
+    assert (r.population, r.compared, r.differ) == (1, 1, [])
+
+
+def test_excluded_different_reason_fails():
+    r = _cx([_oex("a", "cashback-roundup")], [_nex("a", "internal-transfer")], {"a"})
+    assert r.differ == [("a", "cashback-roundup", "internal-transfer")]
+
+
+def test_old_excluded_new_kept_fails():
+    r = _cx([_oex("a")], [_nex("a", status="kept")], {"a"})
+    assert r.differ == [("a", "internal-transfer", "kept")]
+    assert _cx([_oex("a")], [], {"a"}).differ == [("a", "internal-transfer", "kept")]
+
+
+def test_old_kept_new_excluded_fails():
+    r = _cx([_oex("a")], [_nex("a"), _nex("k", "cashback-roundup")], {"a", "k"})
+    assert r.old_kept_excluded == [("k", "cashback-roundup")]
+
+
+def test_old_kept_is_raw_minus_old_excluded():
+    r = _cx([_oex("a"), _oex("x#1", "split")], [_nex("a")], {"a", "k1", "k2", "x"})
+    assert r.old_kept == 3  # k1, k2, x: raw minus the old excluded ids {a, x#1}
+
+
+def test_next_slice_reasons_reported_and_asserted_not_excluded():
+    old = [_oex("s1#1", "split"), _oex("s2#1", "split"), _oex("c1#rest", "credit-principal"), _oex("a")]
+    r = _cx(old, [_nex("a")], {"a", "s1", "s2", "c1"})
+    assert r.next_slice == {"split": 2, "credit-principal": 1}
+    assert r.next_slice_excluded == [] and r.population == 1 and r.derived == 3
+
+
+def test_split_id_excluded_in_new_fails():
+    r = _cx([_oex("s1#1", "split")], [_nex("s1")], {"s1"})
+    assert r.next_slice_excluded == [("s1", "split", "internal-transfer")]
+
+
+def test_credit_principal_base_id_excluded_in_new_fails():
+    r = _cx([_oex("c1#rest", "credit-principal")], [_nex("c1", "credit-drawdown")], {"c1"})
+    assert r.next_slice_excluded == [("c1", "credit-principal", "credit-drawdown")]
+
+
+def test_split_pending_bucket_counted_and_not_excluded():
+    r = _cx([_oex("a")], [_nex("a"), _nex("w1")], {"a", "w1", "w2"}, pending={"w1", "w2"})
+    assert r.split_pending == 2 and r.split_pending_excluded == ["w1"]
+
+
+def test_account_not_included_allowlisted_by_id():
+    new = [_nex("n1", "account-not-included"), _nex("n2", "account-not-included")]
+    r = _cx([], new, {"n1", "n2", "k"}, not_included={"n1", "n2"})
+    assert r.old_kept_excluded == [] and r.not_included_mismatch == []
+
+
+def test_account_not_included_on_included_account_fails():
+    new = [_nex("n1", "account-not-included"), _nex("bad", "account-not-included")]
+    r = _cx([], new, {"n1", "bad"}, not_included={"n1"})
+    assert r.not_included_mismatch == ["bad"]
+    assert r.old_kept_excluded == [("bad", "account-not-included")]
+
+
+def test_exit_code_includes_excluded_result():
+    ok = _cx([_oex("a")], [_nex("a")], {"a"})
+    bad = _cx([_oex("a")], [_nex("a", "cashback-roundup")], {"a"})
+    assert exit_code(_result(), ok) == 0
+    assert exit_code(_result(), bad) != 0
+    assert exit_code(_result(), _cx([], [], set())) != 0  # empty excluded population
