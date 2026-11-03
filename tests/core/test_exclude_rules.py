@@ -89,6 +89,8 @@ def test_miles_partner_must_match_date_amount_currency_and_owner():
         row("p4", "hers", direction="expense"),
         row("p5", "his2"),  # same figures but income
     )
+    # A12 (Task 6) pairs opposite legs of one owner within 2 s; keep every row at least an hour apart so only A10 is under test
+    partners = tuple(replace(p, time=p.time.replace(hour=13 + i)) for i, p in enumerate(partners))
     got = run(row("in", "his", "виведення миль"), *partners, rules=(MILES,))
     assert got["in"].status == "unresolved"
     assert {got[p].status for p in ("p1", "p2", "p3", "p4")} == {"unresolved"}

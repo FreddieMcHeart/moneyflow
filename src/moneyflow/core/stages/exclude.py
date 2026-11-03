@@ -5,7 +5,7 @@ from dataclasses import replace
 
 from moneyflow.core.cash import cash
 from moneyflow.core.cross_owner import coverage, cross_owner
-from moneyflow.core.internal import internal
+from moneyflow.core.internal import internal_pairs
 from moneyflow.core.kinds.exclude import apply_rule, apply_ruling
 from moneyflow.core.model import BuildRefused, Inputs, LedgerEntry, Rule, Transaction
 from moneyflow.core.owners import is_budget_owner_account, owner_of
@@ -99,10 +99,17 @@ def _exclude_rules(entries: list[LedgerEntry], inputs: Inputs) -> list[LedgerEnt
     return [state[e.transaction_id] for e in entries]
 
 
+def _internal(entries: list[LedgerEntry], inputs: Inputs) -> list[LedgerEntry]:
+    """A12: both legs of an internal transfer are excluded."""
+    paired = internal_pairs(entries, inputs)
+    reason = "internal-transfer"
+    return [_excluded(e, reason, f"core:{reason}") if e.transaction_id in paired else e for e in entries]
+
+
 def exclude(entries: list[LedgerEntry], inputs: Inputs) -> list[LedgerEntry]:
     entries = _exclude_rulings(entries, inputs)
     entries = cash(entries, inputs)
     entries = _cross_owner(entries, inputs)  # A6/A7/A8
     entries = _other_owner_income(entries, inputs)
     entries = _exclude_rules(entries, inputs)
-    return internal(entries, inputs)
+    return _internal(entries, inputs)

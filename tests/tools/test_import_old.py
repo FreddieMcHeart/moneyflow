@@ -1,6 +1,7 @@
 """Synthetic old-repo trees built in tmp_path; no real data."""
 
 import textwrap
+from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
 
@@ -236,3 +237,20 @@ def test_stale_transaction_ruling_survives_import_cli(conn, tmp_path):
     (repo / "data" / "monobank_import" / "acc1_2026-01-01_2026-01-31.csv").write_text(_csv(_row("t2", "3.00", "income")))
     run(repo, conn)
     assert {r.id for r in db.load_inputs(conn).rulings} == {"override:t1", "override:t2"}
+
+
+def _times(tmp_path, time: str):
+    row = f"2026-01-05,{time},10.50,UAH,expense,5411,shop,note,,t1"
+    repo = _old_repo(tmp_path, files={"acc1_2026-01-01_2026-01-31.csv": _csv(row)})
+    return read_raw(repo / "data" / "monobank_import", read_accounts(repo / "data" / "accounts.yaml"))
+
+
+def test_naive_time_read_as_utc(tmp_path):
+    (naive,) = _times(tmp_path / "n", "2026-01-05T12:00:00")
+    (aware,) = _times(tmp_path / "a", "2026-01-05T14:00:00+02:00")
+    assert naive.time == aware.time == datetime(2026, 1, 5, 12, 0, 0)
+
+
+def test_unparsable_time_refuses(tmp_path):
+    with pytest.raises(ValueError):
+        _times(tmp_path, "not a time")
