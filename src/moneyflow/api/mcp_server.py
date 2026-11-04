@@ -7,14 +7,6 @@ from mcp.server.fastmcp import FastMCP
 from moneyflow.services import queries
 from moneyflow.storage import db
 
-_NOT_PORTED = """
-    WARNING, phase 0: these numbers are WRONG for any budget cycle, and must not be read as "preliminary".
-    Phase 0 does not port these old pipeline stages: exclude, split, refund, apply_reimbursements,
-    apply_debts, apply_person_returns, apply_investment_withdrawals, and cycle assignment.
-    Totals and income over a cycle therefore differ from the old ledger (measured 2026-11-01: cycle 2026-10
-    differs by 264,649.00 UAH). Amounts are signed (income +, expense -) strings; dates are ISO (YYYY-MM-DD)."""
-
-
 def _money(amount) -> str:
     return str(amount)
 
@@ -25,10 +17,29 @@ def _tool_spending(db_url: str, category: str, date_from: str, date_to: str) -> 
     return {currency: _money(amount) for currency, amount in result.items()}
 
 
-def _tool_category_totals(db_url: str, date_from: str, date_to: str) -> list[dict]:
+def _iso(value: str | None) -> date | None:
+    return None if value is None else date.fromisoformat(value)
+
+
+def _tool_category_totals(
+    db_url: str, date_from: str | None, date_to: str | None, budget_month: str | None
+) -> list[dict]:
     with db.connect(db_url) as conn:
-        rows = queries.category_totals(conn, date.fromisoformat(date_from), date.fromisoformat(date_to))
+        rows = queries.category_totals(conn, _iso(date_from), _iso(date_to), budget_month=budget_month)
     return [{"category": c, "subcategory": s, "currency": cur, "amount": _money(a)} for c, s, cur, a in rows]
+
+
+def _tool_month_summary(db_url: str, budget_month: str | None) -> dict[str, object]:
+    with db.connect(db_url) as conn:
+        m = queries.month_summary(conn, budget_month, today=date.today())
+    return {
+        "budget_month": m.budget_month, "cycle_start": m.cycle_start.isoformat(),
+        "cycle_end": None if m.cycle_end is None else m.cycle_end.isoformat(), "cycle_open": m.cycle_open,
+        "days_total": m.days_total, "days_left": m.days_left,
+        "income": {c: _money(a) for c, a in m.income.items()},
+        "total_actual": {c: _money(a) for c, a in m.total_actual.items()},
+        "cash_in_hand": None if m.cash_in_hand is None else _money(m.cash_in_hand),
+    }
 
 
 def _tool_find_transactions(
@@ -50,9 +61,18 @@ def create_server(db_url: str) -> FastMCP:
         """Signed kept amount per currency for one category over [date_from, date_to], both inclusive."""
         return _tool_spending(db_url, category, date_from, date_to)
 
-    def category_totals(date_from: str, date_to: str) -> list[dict]:
-        """Signed kept amount per (category, subcategory, currency) over [date_from, date_to], both inclusive."""
-        return _tool_category_totals(db_url, date_from, date_to)
+    def category_totals(
+        date_from: str | None = None, date_to: str | None = None, budget_month: str | None = None
+    ) -> list[dict]:
+        """Signed kept amount per (category, subcategory, currency), either over [date_from, date_to] (both
+        inclusive) or over one budget month (YYYY-MM), not both."""
+        return _tool_category_totals(db_url, date_from, date_to, budget_month)
+
+    def month_summary(budget_month: str | None = None) -> dict[str, object]:
+        """One budget cycle: dates, days total and left, income and total actual per currency (original-currency
+        amounts, never folded into one number) and cash in hand (null before the cash cutover). budget_month
+        (YYYY-MM) defaults to the open cycle."""
+        return _tool_month_summary(db_url, budget_month)
 
     def find_transactions(
         date_from: str, date_to: str, text: str | None = None, account_id: str | None = None, limit: int = 20
@@ -60,9 +80,7 @@ def create_server(db_url: str) -> FastMCP:
         """Transactions with their ledger entry. `text` is a case-insensitive substring of description or comment."""
         return _tool_find_transactions(db_url, date_from, date_to, text, account_id, limit)
 
-    spending.__doc__ += _NOT_PORTED  # type: ignore[operator]
-    category_totals.__doc__ += _NOT_PORTED  # type: ignore[operator]
     server = FastMCP("moneyflow")
-    for tool in (spending, category_totals, find_transactions):
+    for tool in (spending, category_totals, find_transactions, month_summary):
         server.tool()(tool)
     return server
