@@ -10,6 +10,7 @@ import yaml
 
 from moneyflow.services.rebuild import rebuild
 from moneyflow.storage import db
+from tests.core._builders import TODAY
 from tools.import_old.__main__ import run
 from tools.import_old.read import read_accounts, read_categories, read_overrides, read_owners, read_raw, read_rules
 
@@ -20,10 +21,17 @@ _HEADER_UAH = "date,time,amount_uah,direction,mcc,description,comment,category,i
 _OWNERS = {"o": {"display": "Owner O", "counterparty_strings": ["o-card", "o-name"]}}
 
 _CASH_SOURCE = """from datetime import date
+from decimal import Decimal
 
 CASH_CUTOVER = date(2026, 11, 1)
+CASH_OPENING = Decimal("250.50")
 CASH_ACCOUNT = "cash-test"
 """
+
+_FX_SOURCE = """FOP_USD_ACCOUNT = "fop-test"
+"""
+
+_FX_HEADER = "row_id,supersedes,date,rate,kind,method,source_ids,observed_at,note"
 
 _REFUNDS_SOURCE = """REFUND_PREFIX = "Скасування."
 """
@@ -81,6 +89,7 @@ def _old_repo(
     manual: dict | None = None,
     exclusions_source: str = _EXCLUSIONS_SOURCE,
     with_cash_account: bool = True,
+    fx_rows: tuple[str, ...] = (),
 ) -> Path:
     if with_cash_account and "cash-test" not in {a[0] for a in accounts}:
         accounts = (*accounts, ("cash-test", "UAH", True))
@@ -89,6 +98,9 @@ def _old_repo(
     finance = tmp_path / "old" / "scripts" / "python" / "finance"
     finance.mkdir(parents=True)
     (finance / "cash.py").write_text(_CASH_SOURCE)
+    (finance / "fx.py").write_text(_FX_SOURCE)
+    (data / "history").mkdir()
+    (data / "history" / "usd_rate.csv").write_text("\n".join([_FX_HEADER, *fx_rows]) + "\n")
     (finance / "exclusions.py").write_text(exclusions_source)
     (finance / "refunds.py").write_text(_REFUNDS_SOURCE)
     (finance / "investment_withdrawals.py").write_text(_INVESTMENT_SOURCE)
@@ -245,7 +257,7 @@ def test_override_for_absent_transaction_is_reported_not_imported(conn, tmp_path
     assert "not imported: 1 overrides for transactions outside phase 0 input" in out
     assert "manual-0" in out
     assert counts["rulings"] == 2
-    assert [r.transaction_id for r in db.load_inputs(conn).rulings] == ["t1", "t2"]
+    assert [r.transaction_id for r in db.load_inputs(conn, today=TODAY).rulings] == ["t1", "t2"]
 
 
 def test_imported_ruling_count_matches_overrides(conn, tmp_path, capsys):
@@ -268,7 +280,7 @@ def test_reimport_is_idempotent_and_keeps_non_import_rows(conn, tmp_path):
     second = run(repo, conn)
     assert first == {"owners": 1, "accounts": 2, "transactions": 2, "rules": 13, "rulings": 2, "categories": 2, "people": 0}
     assert second == {**first, "rulings": 3}
-    assert {r.id for r in db.load_inputs(conn).rulings} == {"override:t1", "override:t2", "op1"}
+    assert {r.id for r in db.load_inputs(conn, today=TODAY).rulings} == {"override:t1", "override:t2", "op1"}
 
 
 def test_stored_transaction_gone_from_source_is_reported_not_deleted(conn, tmp_path, capsys):
@@ -280,7 +292,7 @@ def test_stored_transaction_gone_from_source_is_reported_not_deleted(conn, tmp_p
     out = capsys.readouterr().out
     assert "not in source: 1 stored transactions\n  t2\n" in out
     assert counts["transactions"] == 2
-    assert [t.id for t in db.load_inputs(conn).transactions] == ["t1", "t2"]
+    assert [t.id for t in db.load_inputs(conn, today=TODAY).transactions] == ["t1", "t2"]
 
 
 def test_stale_transaction_ruling_survives_import_cli(conn, tmp_path):
@@ -288,7 +300,7 @@ def test_stale_transaction_ruling_survives_import_cli(conn, tmp_path):
     run(repo, conn)
     (repo / "data" / "monobank_import" / "acc1_2026-01-01_2026-01-31.csv").write_text(_csv(_row("t2", "3.00", "income")))
     run(repo, conn)
-    assert {r.id for r in db.load_inputs(conn).rulings} == {"override:t1", "override:t2"}
+    assert {r.id for r in db.load_inputs(conn, today=TODAY).rulings} == {"override:t1", "override:t2"}
 
 
 def _times(tmp_path, time: str):
@@ -309,7 +321,7 @@ def test_unparsable_time_refuses(tmp_path):
 
 
 def _by_id(conn, kind: str) -> dict:
-    inputs = db.load_inputs(conn)
+    inputs = db.load_inputs(conn, today=TODAY)
     return {x.id: x for x in (inputs.rulings if kind == "rulings" else inputs.rules)}
 
 
@@ -323,7 +335,7 @@ def test_imports_owners_and_budget_owner(conn, tmp_path):
         files={"acc1_2026-01-01_2026-01-31.csv": _csv(_row("t1"))},
     )
     run(repo, conn)
-    stored = {o.id: o for o in db.load_inputs(conn).owners}
+    stored = {o.id: o for o in db.load_inputs(conn, today=TODAY).owners}
     assert [(o.id, o.display, o.counterparty_strings, o.budget) for o in stored.values()] == [
         ("o", "Owner O", ("o-card",), False),
         ("p", "Owner P", ("p-card", "p-name"), True),
@@ -336,7 +348,7 @@ def test_imports_cash_from(conn, tmp_path):
         files={"acc1_2026-01-01_2026-01-31.csv": _csv(_row("t1"))},
     )
     run(repo, conn)
-    assert {a.id: a.cash_from for a in db.load_inputs(conn).accounts} == {
+    assert {a.id: a.cash_from for a in db.load_inputs(conn, today=TODAY).accounts} == {
         "acc1": None, "cash-test": date(2026, 11, 1),
     }
 
@@ -366,7 +378,7 @@ def test_white_card_with_override_gets_both_rulings_with_distinct_ids(conn, tmp_
         tmp_path, overrides={"t1": {"category": "food", "note": "n"}}, manual={"white_card_spending": {"t1": "wc"}}
     )
     run(repo, conn)
-    stored = [(g.id, g.kind) for g in db.load_inputs(conn).rulings if g.transaction_id == "t1"]
+    stored = [(g.id, g.kind) for g in db.load_inputs(conn, today=TODAY).rulings if g.transaction_id == "t1"]
     assert sorted(stored) == [("override:t1", "category"), ("white_card:t1", "white_card")]
 
 
@@ -406,7 +418,7 @@ def test_white_card_split_leg_builds_in_rebuild(conn, tmp_path):
         })
     )
     run(repo, conn)
-    parts = sorted((e.part, e.status, e.category, e.amount) for e in rebuild(conn) if e.transaction_id == "t1")
+    parts = sorted((e.part, e.status, e.category, e.amount) for e in rebuild(conn, today=TODAY) if e.transaction_id == "t1")
     assert parts == [
         (0, "excluded", "misc", Decimal("-30.00")),
         (1, "kept", "food", Decimal("-2.00")),
@@ -441,7 +453,7 @@ def test_debts_and_people_imported(conn, tmp_path):
         "debts": {"t1": {"person": "alice", "kind": "lent", "note": "loan"}},
     }
     run(_manual_repo(tmp_path, manual=manual), conn)
-    (person,) = db.load_inputs(conn).people
+    (person,) = db.load_inputs(conn, today=TODAY).people
     assert (person.id, person.display, person.opening_balance, person.note) == ("alice", "alice", Decimal("10.00"), "start")
     ruling = _by_id(conn, "rulings")["debt:t1"]
     assert (ruling.kind, dict(ruling.payload)) == ("debt", {"person": "alice", "kind": "lent", "note": "loan"})
@@ -466,7 +478,7 @@ def _manual_expense_repo(tmp_path):
 
 def test_manual_expenses_become_manual_transactions(conn, tmp_path):
     run(_manual_expense_repo(tmp_path), conn)
-    inputs = db.load_inputs(conn)
+    inputs = db.load_inputs(conn, today=TODAY)
     manual = {t.id: t for t in inputs.transactions if t.source == "manual"}
     first, second = manual["manual-1"], manual["manual-2"]
     assert (first.account_id, first.date, first.time, first.amount, first.currency, first.direction) == (
@@ -485,13 +497,13 @@ def test_manual_transactions_land_kept_in_rebuild_and_survive_reimport(conn, tmp
     repo = _manual_expense_repo(tmp_path)
     run(repo, conn)
     run(repo, conn)
-    kept = {e.transaction_id: (e.status, e.category, e.amount) for e in rebuild(conn) if e.transaction_id.startswith("manual-")}
+    kept = {e.transaction_id: (e.status, e.category, e.amount) for e in rebuild(conn, today=TODAY) if e.transaction_id.startswith("manual-")}
     assert kept == {"manual-1": ("kept", "food", Decimal("-12.30")), "manual-2": ("kept", "Income", Decimal("50.00"))}
 
 
 def test_reclassify_rules_imported(conn, tmp_path, capsys):
     run(_manual_repo(tmp_path), conn)
-    rules = {r.id: r for r in db.load_inputs(conn).rules if r.kind != "categorize" and r.kind != "exclude"}
+    rules = {r.id: r for r in db.load_inputs(conn, today=TODAY).rules if r.kind != "categorize" and r.kind != "exclude"}
     assert sorted((r.kind, r.id, dict(r.match), dict(r.result)) for r in rules.values()) == [
         ("cancellation", "import-cancellation", {"description_prefix": "Скасування."}, {}),
         ("credit_repayment", "import-credit-repayment", {"description_prefix": "Погашення "}, {}),
@@ -533,7 +545,7 @@ def test_imports_instalment_exception_ruling(conn, tmp_path):
 
 def test_imports_exclude_rules_per_alternative(conn, tmp_path, capsys):
     run(_manual_repo(tmp_path), conn)
-    rules = {r.id: r for r in db.load_inputs(conn).rules if r.kind == "exclude"}
+    rules = {r.id: r for r in db.load_inputs(conn, today=TODAY).rules if r.kind == "exclude"}
     assert sorted((r.id, r.match["description_contains"], r.result["reason"]) for r in rules.values()) == [
         ("import-exclude-cashback-roundup-1", "кешбек", "cashback-roundup"),
         ("import-exclude-cashback-roundup-2", "кешбэк", "cashback-roundup"),
@@ -548,12 +560,12 @@ def test_imports_exclude_rules_per_alternative(conn, tmp_path, capsys):
 
 def test_instalment_alternative_is_not_a_rule(conn, tmp_path):
     run(_manual_repo(tmp_path), conn)
-    assert not [r for r in db.load_inputs(conn).rules if "розстрочка" in str(r.match.get("description_contains"))]
+    assert not [r for r in db.load_inputs(conn, today=TODAY).rules if "розстрочка" in str(r.match.get("description_contains"))]
 
 
 def test_optional_letter_alternative_expands_to_two_literals(conn, tmp_path):
     run(_manual_repo(tmp_path), conn)
-    literals = {r.match["description_contains"] for r in db.load_inputs(conn).rules if r.kind == "exclude"}
+    literals = {r.match["description_contains"] for r in db.load_inputs(conn, today=TODAY).rules if r.kind == "exclude"}
     assert {"округлення балансу", "округленя балансу"} <= literals
     assert not any("?" in str(x) or "\\" in str(x) for x in literals)
 
@@ -584,7 +596,7 @@ def test_expense_row_with_drawdown_text_not_excluded_after_import_and_rebuild(co
         )},
     )
     run(repo, conn)
-    entries = {e.transaction_id: e for e in rebuild(conn)}
+    entries = {e.transaction_id: e for e in rebuild(conn, today=TODAY)}
     assert (entries["in1"].status, entries["in1"].reason, entries["in1"].decided_by) == (
         "excluded", "credit-drawdown", "rule:import-exclude-credit-drawdown-2",
     )
@@ -598,7 +610,83 @@ def test_reimport_of_exclude_inputs_is_idempotent(conn, tmp_path):
         manual={"unpaired_transfers": {"t1": "a"}, "white_card_spending": {"t3": "wc"}, "splits": _SPLIT},
     )
     first = run(repo, conn)
-    stored = {(g.id, g.kind) for g in db.load_inputs(conn).rulings}
+    stored = {(g.id, g.kind) for g in db.load_inputs(conn, today=TODAY).rulings}
     second = run(repo, conn)
     assert second == first
-    assert {(g.id, g.kind) for g in db.load_inputs(conn).rulings} == stored
+    assert {(g.id, g.kind) for g in db.load_inputs(conn, today=TODAY).rulings} == stored
+
+
+_INCOME = "2026-01-{day:02d},2026-01-{day:02d}T12:00:00+02:00,{amount},UAH,income,5411,salary,,,{tid}"
+
+
+def _attribution_repo(tmp_path, attribution):
+    return _old_repo(
+        tmp_path,
+        files={"acc1_2026-01-01_2026-01-31.csv": _csv(_row("t1", direction="income"), _row("t2"))},
+        manual={"attribution": attribution},
+    )
+
+
+def test_attribution_becomes_attribute_rulings(conn, tmp_path):
+    run(_attribution_repo(tmp_path, {"t1": "2026-01"}), conn)
+    got = [r for r in db.load_inputs(conn, today=TODAY).rulings if r.kind == "attribute"]
+    assert [(r.id, r.transaction_id, r.payload, r.created_by) for r in got] == [
+        ("attribute:t1", "t1", {"budget_month": "2026-01"}, "import"),
+    ]
+
+
+def test_attribution_on_unknown_tx_refuses(conn, tmp_path):
+    with pytest.raises(ValueError, match="attribution.*ghost"):
+        run(_attribution_repo(tmp_path, {"t1": "2026-01", "ghost": "2026-02"}), conn)
+
+
+def _fx_repo(tmp_path, *rows):
+    return _old_repo(tmp_path, fx_rows=rows)
+
+
+_RATE_A = "aaaaaaaaaaaa,,2026-01-07,41.0000,official,test-a,s1,,"
+_RATE_B = "bbbbbbbbbbbb,,2026-01-07,41.2500,sell,test-b,,2026-01-07T10:00:00,note"
+
+
+def test_fx_rates_imported_with_row_id(conn, tmp_path):
+    run(_fx_repo(tmp_path, _RATE_A, _RATE_B), conn)
+    got = sorted((x.id, x.date, x.rate, x.kind, x.method) for x in db.load_inputs(conn, today=TODAY).fx_rates)
+    assert got == [
+        ("aaaaaaaaaaaa", date(2026, 1, 7), Decimal("41.0000"), "official", "test-a"),
+        ("bbbbbbbbbbbb", date(2026, 1, 7), Decimal("41.2500"), "sell", "test-b"),
+    ]
+
+
+def test_duplicate_fx_row_id_refuses(conn, tmp_path):
+    with pytest.raises(ValueError, match="duplicate.*aaaaaaaaaaaa"):
+        run(_fx_repo(tmp_path, _RATE_A, _RATE_A), conn)
+
+
+def test_reimport_replaces_fx_rates(conn, tmp_path):
+    run(_fx_repo(tmp_path, _RATE_A, _RATE_B), conn)
+    other = tmp_path / "second"
+    other.mkdir()
+    run(_fx_repo(other, _RATE_B), conn)
+    assert [x.id for x in db.load_inputs(conn, today=TODAY).fx_rates] == ["bbbbbbbbbbbb"]
+
+
+def _accounts_after_import(conn, tmp_path):
+    repo = _old_repo(tmp_path, accounts=(("acc1", "UAH", True), ("fop-test", "USD", True)))
+    run(repo, conn)
+    return {a.id: a for a in db.load_inputs(conn, today=TODAY).accounts}
+
+
+def test_fop_account_gets_floor_step_100(conn, tmp_path):
+    assert _accounts_after_import(conn, tmp_path)["fop-test"].fx_income_floor_step == Decimal("100")
+
+
+def test_other_accounts_get_floor_step_5(conn, tmp_path):
+    got = _accounts_after_import(conn, tmp_path)
+    assert {i: a.fx_income_floor_step for i, a in got.items() if i != "fop-test"} == {"acc1": Decimal("5"), "cash-test": Decimal("5")}
+
+
+def test_cash_opening_imported_on_cash_account(conn, tmp_path):
+    got = _accounts_after_import(conn, tmp_path)
+    assert got["cash-test"].cash_opening == Decimal("250.50")
+    assert got["cash-test"].cash_from == date(2026, 11, 1)
+    assert got["acc1"].cash_opening is None

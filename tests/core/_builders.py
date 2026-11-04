@@ -3,11 +3,16 @@
 from datetime import date, datetime
 from decimal import Decimal
 
-from moneyflow.core.model import Account, Inputs, Owner, Person, Rule, Ruling, Transaction
+from moneyflow.core.model import Account, FxRate, Inputs, Owner, Person, Rule, Ruling, Transaction
+
+TODAY = date(2026, 1, 31)
 
 
-def account(id: str = "acc1", currency: str = "UAH", include: bool = True) -> Account:
-    return Account(id=id, name=id, currency=currency, owner="o", role="main", include=include, cash_from=None)
+def account(
+    id: str = "acc1", currency: str = "UAH", include: bool = True, role: str = "main", income_floor_step: str = "5"
+) -> Account:
+    return Account(id=id, name=id, currency=currency, owner="o", role=role, include=include, cash_from=None,
+                   fx_income_floor_step=Decimal(income_floor_step), cash_opening=None)
 
 
 def owner(id: str = "o", budget: bool = True, counterparty_strings: tuple[str, ...] = ()) -> Owner:
@@ -23,12 +28,14 @@ def tx(
     description: str = "shop",
     day: int = 1,
     source: str = "bank",
+    month: int = 1,
+    hour: int = 12,
 ) -> Transaction:
     return Transaction(
         id=id,
         account_id=account_id,
-        date=date(2026, 1, day),
-        time=datetime(2026, 1, day, 12, 0),
+        date=date(2026, month, day),
+        time=datetime(2026, month, day, hour, 0),
         amount=Decimal(amount),
         currency=currency,
         direction=direction,  # type: ignore[arg-type]
@@ -83,6 +90,44 @@ def split_ruling(
     return Ruling(id=f"split:{transaction_id}:{n}", transaction_id=transaction_id, kind="split", payload=payload, created_by="test")
 
 
+def reimbursement_ruling(transaction_id: str, category: str, id: str | None = None) -> Ruling:
+    return Ruling(
+        id=id or f"reimbursement:{transaction_id}",
+        transaction_id=transaction_id,
+        kind="reimbursement",
+        payload={"category": category},
+        created_by="test",
+    )
+
+
+def debt_ruling(transaction_id: str, person: str = "alice", kind: str = "lent", id: str | None = None) -> Ruling:
+    return Ruling(
+        id=id or f"debt:{transaction_id}",
+        transaction_id=transaction_id,
+        kind="debt",
+        payload={"person": person, "kind": kind},
+        created_by="test",
+    )
+
+
+def attribute_ruling(transaction_id: str, month: str | None) -> Ruling:
+    return Ruling(
+        id=f"attribute:{transaction_id}",
+        transaction_id=transaction_id,
+        kind="attribute",
+        payload={"budget_month": month},
+        created_by="test",
+    )
+
+
+def fx_rate(day: int, rate: str, kind: str = "official", id: str | None = None, month: int = 1) -> FxRate:
+    return FxRate(id=id or f"{kind}-{month}-{day}", date=date(2026, month, day), rate=Decimal(rate), kind=kind, method="test")  # type: ignore[arg-type]
+
+
+def person(id: str, display: str, opening_balance: str = "0", note: str | None = None) -> Person:
+    return Person(id=id, display=display, opening_balance=Decimal(opening_balance), note=note)
+
+
 def inputs(
     transactions: tuple[Transaction, ...] = (),
     rules: tuple[Rule, ...] = (),
@@ -91,6 +136,7 @@ def inputs(
     categories: frozenset[str] = frozenset({"food", "misc"}),
     owners: tuple[Owner, ...] = (),
     people: tuple[Person, ...] = (),
+    fx_rates: tuple[FxRate, ...] = (),
 ) -> Inputs:
     return Inputs(
         owners=owners or (owner(),),
@@ -100,4 +146,6 @@ def inputs(
         rulings=rulings,
         categories=categories,
         people=people,
+        fx_rates=fx_rates,
+        today=TODAY,
     )

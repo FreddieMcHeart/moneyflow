@@ -5,12 +5,17 @@ from decimal import Decimal
 
 import psycopg
 
+from moneyflow.core.cycles import build_cycles
+from moneyflow.core.model import BuildRefused
+from moneyflow.core.reports import MonthSummary, month_summaries
 from moneyflow.core.reports import category_totals as _core_totals
 from moneyflow.storage import db
 
 
-def _totals(conn: psycopg.Connection, date_from: date, date_to: date) -> dict[tuple[str, str | None, str], Decimal]:
-    return _core_totals(db.load_ledger(conn), date_from, date_to)
+def _totals(
+    conn: psycopg.Connection, date_from: date | None, date_to: date | None, budget_month: str | None = None
+) -> dict[tuple[str, str | None, str], Decimal]:
+    return _core_totals(db.load_ledger(conn), budget_month=budget_month, start=date_from, end=date_to)
 
 
 def spending(conn: psycopg.Connection, category: str, date_from: date, date_to: date) -> dict[str, Decimal]:
@@ -23,11 +28,24 @@ def spending(conn: psycopg.Connection, category: str, date_from: date, date_to: 
 
 
 def category_totals(
-    conn: psycopg.Connection, date_from: date, date_to: date
+    conn: psycopg.Connection, date_from: date | None = None, date_to: date | None = None, *,
+    budget_month: str | None = None,
 ) -> list[tuple[str, str | None, str, Decimal]]:
-    """(category, subcategory, currency, amount) rows, ordered by category, subcategory (none first), currency."""
-    rows = [(c, s, cur, amount) for (c, s, cur), amount in _totals(conn, date_from, date_to).items()]
+    """(category, subcategory, currency, amount) rows by dates or by budget month, ordered by category,
+    subcategory (none first), currency."""
+    rows = [(c, s, cur, a) for (c, s, cur), a in _totals(conn, date_from, date_to, budget_month).items()]
     return sorted(rows, key=lambda r: (r[0], r[1] is not None, r[1] or "", r[2]))
+
+
+def month_summary(conn: psycopg.Connection, budget_month: str | None, *, today: date) -> MonthSummary:
+    """The summary of one cycle; `budget_month` None means the open cycle. `today` comes from the caller's clock."""
+    inputs = db.load_inputs(conn, today=today)
+    ledger = db.load_ledger(conn)
+    summaries = month_summaries(ledger, build_cycles(list(ledger), inputs), inputs)
+    for summary in summaries:
+        if summary.budget_month == budget_month if budget_month is not None else summary.cycle_open:
+            return summary
+    raise BuildRefused(f"no cycle {budget_month}" if budget_month else "no open cycle", None)
 
 
 _FIND = """

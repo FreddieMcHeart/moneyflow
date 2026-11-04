@@ -2,6 +2,7 @@
 
 from dataclasses import replace
 from datetime import date
+from decimal import Decimal
 
 import pytest
 
@@ -15,7 +16,8 @@ CUTOVER = date(2026, 1, 10)
 
 
 def acct(id: str, owner_id: str = "o", currency: str = "UAH", cash_from: date | None = None, include: bool = True) -> Account:
-    return Account(id=id, name=id, currency=currency, owner=owner_id, role="main", include=include, cash_from=cash_from)
+    return Account(id=id, name=id, currency=currency, owner=owner_id, role="main", include=include, cash_from=cash_from,
+                   fx_income_floor_step=Decimal("5"), cash_opening=None)
 
 
 CARD = acct("card")

@@ -3,16 +3,19 @@
 import ast
 import csv
 import itertools
+from collections import Counter
 from datetime import UTC, date, datetime, time
 from decimal import Decimal
 from pathlib import Path
 
 import yaml
 
-from moneyflow.core.model import Account, Owner, Person, Rule, Ruling, Transaction
+from moneyflow.core.model import Account, FxRate, Owner, Person, Rule, Ruling, Transaction
 
 _DIRECTIONS = ("income", "expense")
 _AMOUNT_KEYS = ("amount_lt", "amount_gte")
+_DEFAULT_FLOOR_STEP = Decimal("5")
+_FOP_FLOOR_STEP = Decimal("100")
 
 
 def _load(path: Path) -> dict:
@@ -21,11 +24,14 @@ def _load(path: Path) -> dict:
 
 
 def read_accounts(path: Path) -> tuple[Account, ...]:
+    """The accounts of the old accounts.yaml. `cash_from`, `cash_opening` and the FX floor step come from the
+    old `finance/` sources (`read_cash`, `read_fx_floor_steps`); the importer sets them."""
     return tuple(
         Account(
             id=str(a["id"]), name=str(a["name"]), currency=str(a["currency"]),
             owner=str(a["owner"]), role=str(a["role"]), include=bool(a["include"]),
             cash_from=None,
+            fx_income_floor_step=_DEFAULT_FLOOR_STEP, cash_opening=None,
         )
         for a in _load(path)["accounts"]
     )
@@ -148,14 +154,62 @@ def _constant(constants: dict[str, ast.expr], name: str, path: Path) -> ast.expr
     return constants[name]
 
 
-def read_cash(cash_source: Path) -> tuple[str, date]:
-    """The cash account id and its cutover date, read from the old `finance/cash.py` source."""
+def _decimal_call(node: ast.expr, name: str) -> Decimal:
+    if not (isinstance(node, ast.Call) and getattr(node.func, "id", None) == "Decimal" and len(node.args) == 1):
+        raise ValueError(f"{name} is not a Decimal(...) call in the old cash.py")
+    return Decimal(str(ast.literal_eval(node.args[0])))
+
+
+def read_cash(cash_source: Path) -> tuple[str, date, Decimal]:
+    """The cash account id, its cutover date and its opening balance, read from the old `finance/cash.py` source."""
     constants = _constants(cash_source)
     account = ast.literal_eval(_constant(constants, "CASH_ACCOUNT", cash_source))
     call = _constant(constants, "CASH_CUTOVER", cash_source)
     if not (isinstance(call, ast.Call) and getattr(call.func, "id", None) == "date"):
         raise ValueError("CASH_CUTOVER is not a date(...) call in the old cash.py")
-    return str(account), date(*(ast.literal_eval(a) for a in call.args))
+    opening = _decimal_call(_constant(constants, "CASH_OPENING", cash_source), "CASH_OPENING")
+    return str(account), date(*(ast.literal_eval(a) for a in call.args)), opening
+
+
+def read_fx_floor_steps(fx_source: Path, accounts: tuple[Account, ...]) -> dict[str, Decimal]:
+    """Account id -> the floor step of a USD income row: 100 on `FOP_USD_ACCOUNT` of the old `finance/fx.py`, 5 elsewhere."""
+    fop = str(ast.literal_eval(_constant(_constants(fx_source), "FOP_USD_ACCOUNT", fx_source)))
+    return {a.id: _FOP_FLOOR_STEP if a.id == fop else _DEFAULT_FLOOR_STEP for a in accounts}
+
+
+def read_attribute_rulings(manual: Path) -> tuple[Ruling, ...]:
+    """`attribution:` (transaction id -> "YYYY-MM") as `attribute` rulings."""
+    return tuple(
+        Ruling(id=f"attribute:{tx}", transaction_id=str(tx), kind="attribute",
+               payload={"budget_month": str(month)}, created_by="import")
+        for tx, month in (_load(manual).get("attribution") or {}).items()
+    )
+
+
+def read_fx_rates(path: Path) -> tuple[FxRate, ...]:
+    """`data/history/usd_rate.csv`, one `fx_rates` row per live line with `id = row_id`.
+
+    A row another row `supersedes` is dropped (the old `read_observations`). A repeated `row_id`
+    refuses, and so does more than one live sell or official row on one date: `rate_for` would
+    otherwise pick by row order, which `order by id` does not preserve.
+    """
+    with open(path, encoding="utf-8", newline="") as handle:
+        rows = list(csv.DictReader(handle))
+    seen: set[str] = set()
+    for row in rows:
+        if row["row_id"] in seen:
+            raise ValueError(f"duplicate row_id {row['row_id']} in {Path(path).name}")
+        seen.add(row["row_id"])
+    superseded = {r["supersedes"] for r in rows if r.get("supersedes")}
+    rows = [r for r in rows if r["row_id"] not in superseded]
+    live = Counter((r["date"], r["kind"]) for r in rows if r["kind"] in ("sell", "official"))
+    for (day, kind), count in sorted(live.items()):
+        if count > 1:
+            raise ValueError(f"more than one live {kind} rate for {day} in {Path(path).name}")
+    return tuple(
+        FxRate(id=r["row_id"], date=date.fromisoformat(r["date"]), rate=Decimal(r["rate"]), kind=r["kind"], method=r["method"])  # type: ignore[arg-type]
+        for r in rows
+    )
 
 
 _REGEX_META = frozenset("\\^$.|?*+()[]{}")

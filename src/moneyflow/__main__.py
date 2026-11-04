@@ -4,6 +4,7 @@ import argparse
 import sys
 from collections import Counter
 from collections.abc import Sequence
+from datetime import date
 
 from moneyflow.core.model import BuildRefused
 from moneyflow.services.rebuild import rebuild
@@ -27,7 +28,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
     try:
         with db.connect(args.db) as conn:
-            ledger = rebuild(conn)
+            ledger = rebuild(conn, today=date.today())
     except BuildRefused as refusal:
         print(f"refused: {refusal.reason}, transaction {refusal.transaction_id}", file=sys.stderr)
         return 1

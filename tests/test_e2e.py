@@ -6,6 +6,7 @@ from decimal import Decimal
 from moneyflow.services import queries
 from moneyflow.services.rebuild import rebuild
 from tests.api.test_mcp_server import _call, _payload
+from tests.core._builders import TODAY
 from tests.tools.test_import_old import _HEADER, _csv, _old_repo
 from tools.import_old.__main__ import run
 
@@ -38,6 +39,7 @@ def _repo(tmp_path):
                 _row("d1", "3.25", "USD", "expense", "cafe abroad", 7), header=_HEADER
             ),
         },
+        fx_rows=("e2efx0000001,,2026-01-07,41.0000,official,test,,,",),
     )
     return repo
 
@@ -46,7 +48,7 @@ def test_import_rebuild_query_mcp(conn, db_url, tmp_path):
     counts = run(_repo(tmp_path), conn)
     assert counts == {"owners": 1, "accounts": 3, "transactions": 5, "rules": 14, "rulings": 1, "categories": 2, "people": 0}
 
-    ledger = rebuild(conn)
+    ledger = rebuild(conn, today=TODAY)
     assert sorted((e.transaction_id, e.status, e.category, e.subcategory, e.amount, e.currency) for e in ledger) == [
         ("d1", "kept", "food", "Coffee", Decimal("-3.25"), "USD"),
         ("u1", "kept", "food", "Coffee", Decimal("-120.50"), "UAH"),

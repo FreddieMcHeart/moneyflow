@@ -18,7 +18,8 @@ OWNERS = (
 
 
 def acct(id: str, owner: str, currency: str = "UAH") -> Account:
-    return Account(id=id, name=id, currency=currency, owner=owner, role="main", include=True, cash_from=None)
+    return Account(id=id, name=id, currency=currency, owner=owner, role="main", include=True, cash_from=None,
+                   fx_income_floor_step=Decimal("5"), cash_opening=None)
 
 
 ACCOUNTS = (acct("his", "owner_a"), acct("his2", "owner_a"), acct("hers", "owner_b"), acct("his_usd", "owner_a", "USD"))

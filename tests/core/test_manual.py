@@ -39,3 +39,14 @@ def test_bank_transaction_excluded_does_not_refuse():
     bank = tx("b1")
     ledger = build(inputs(transactions=(bank,), rulings=(exclude_ruling("exclude:x:b1", "b1", "x"),)))
     assert [e.status for e in ledger] == ["excluded"]
+
+
+def test_manual_transaction_outside_cycle_refuses():
+    from tests.core._builders import account, attribute_ruling
+
+    accounts = (account("acc1"), account("inc", role="income"))
+    salary = tx("a", account_id="inc", direction="income", amount="500.00", day=10, hour=9)
+    manual = tx("manual-5", source="manual", day=2)
+    rulings = (attribute_ruling("a", "2026-01"), ruling("manual:manual-5", "manual-5", "food"))
+    with pytest.raises(BuildRefused, match=r"manual-5 is outside every budget cycle \(2026-01-02, first cycle starts 2026-01-10\)"):
+        build(inputs(transactions=(salary, manual), rulings=rulings, accounts=accounts))

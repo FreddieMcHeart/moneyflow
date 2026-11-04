@@ -5,26 +5,27 @@ from decimal import Decimal
 import psycopg
 import pytest
 
-from moneyflow.core.model import LedgerEntry, Person, Ruling
+from moneyflow.core.model import FxRate, LedgerEntry, Ruling
 from moneyflow.storage import db
-from tests.core._builders import account, owner, rule, ruling, tx
+from tests.core._builders import TODAY, account, owner, person, rule, ruling, tx
 
 
 def _entry(tid: str, category: str, amount: str = "-10.00") -> LedgerEntry:
     t = tx(tid)
-    return LedgerEntry(tid, 0, t.date, "acc1", category, None, Decimal(amount), "UAH", "kept", None, "rule:r1", "expense", None)
+    return LedgerEntry(tid, 0, t.date, "acc1", category, None, Decimal(amount), "UAH", "kept", None, "rule:r1", "expense", None, None, None, None, None)
 
 
-def _write(conn, rules=(), rulings=(), transactions=(), categories=("food",), people=()):
+def _write(conn, rules=(), rulings=(), transactions=(), categories=("food",), people=(), accounts=None, fx_rates=()):
     return db.replace_imported(
         conn,
         owners=(owner(),),
-        accounts=(account(),),
+        accounts=accounts or (account(),),
         transactions=transactions,
         rules=rules,
         rulings=rulings,
         categories=categories,
         people=people,
+        fx_rates=fx_rates,
     )
 
 
@@ -37,7 +38,7 @@ def test_round_trip_inputs(conn):
     rules = (_import_rule("r1", description_contains="shop", amount_lt="500"),)
     rulings = (replace(ruling("g1", "t1", "food", None), created_by="import"),)
     counts = _write(conn, rules, rulings, txs, ("food", "misc"))
-    got = db.load_inputs(conn)
+    got = db.load_inputs(conn, today=TODAY)
     assert got.owners == (owner(),)
     assert got.accounts == (account(),)
     assert got.transactions == txs
@@ -52,7 +53,7 @@ def test_round_trip_inputs(conn):
 
 def test_inactive_rules_are_not_loaded(conn):
     _write(conn, rules=(replace(_import_rule("r1"), active=False), _import_rule("r2")))
-    assert [r.id for r in db.load_inputs(conn).rules] == ["r2"]
+    assert [r.id for r in db.load_inputs(conn, today=TODAY).rules] == ["r2"]
 
 
 def test_save_ledger_replaces(conn):
@@ -70,7 +71,7 @@ def test_replace_imported_keeps_operator_rows(conn):
         " values ('op1', 't1', 'category', '{\"category\": \"misc\", \"subcategory\": null}', 'operator')"
     )
     _write(conn, transactions=txs)
-    assert [r.id for r in db.load_inputs(conn).rulings] == ["op1"]
+    assert [r.id for r in db.load_inputs(conn, today=TODAY).rulings] == ["op1"]
 
 
 def test_replace_imported_keeps_operator_rules_and_categories(conn):
@@ -81,7 +82,7 @@ def test_replace_imported_keeps_operator_rules_and_categories(conn):
     )
     conn.execute("insert into categories (name, created_by) values ('opcat', 'operator')")
     _write(conn, rules=(_import_rule("r2"),), categories=("misc",))
-    got = db.load_inputs(conn)
+    got = db.load_inputs(conn, today=TODAY)
     assert {r.id for r in got.rules} == {"oprule", "r2"}
     assert got.categories == frozenset({"opcat", "misc"})
 
@@ -103,11 +104,11 @@ def test_load_inputs_reads_one_snapshot(conn, db_url, monkeypatch):
             calls.append(query)  # before the insert: replace_imported below calls _rows too
             with db.connect(db_url) as other:
                 db.replace_imported(other, owners=(owner(),), accounts=(account(),), transactions=(tx("t1"), tx("t2")),
-                                    rules=(), rulings=(), categories=("food",), people=())
+                                    rules=(), rulings=(), categories=("food",), people=(), fx_rates=())
         return got
 
     monkeypatch.setattr(db, "_rows", rows_then_concurrent_insert)
-    assert [t.id for t in db.load_inputs(conn).transactions] == ["t1"]
+    assert [t.id for t in db.load_inputs(conn, today=TODAY).transactions] == ["t1"]
 
 
 def test_reimport_keeps_ruling_of_transaction_missing_from_source(conn):
@@ -124,7 +125,7 @@ def test_reimport_replaces_ruling_of_transaction_still_in_source(conn):
     t1 = tx("t1")
     _write(conn, transactions=(t1,), rulings=(ruling("override:t1", "t1", "food"),))
     _write(conn, transactions=(t1,), rulings=(ruling("override:t1", "t1", "misc"),), categories=("food", "misc"))
-    got = db.load_inputs(conn).rulings
+    got = db.load_inputs(conn, today=TODAY).rulings
     assert len(got) == 1
     assert got[0].payload["category"] == "misc"
 
@@ -132,14 +133,13 @@ def test_reimport_replaces_ruling_of_transaction_still_in_source(conn):
 def _replace(conn, owners, accounts, rules=(), rulings=(), transactions=()):
     return db.replace_imported(
         conn, owners=owners, accounts=accounts, transactions=transactions,
-        rules=rules, rulings=rulings, categories=("food",), people=(),
-    )
+        rules=rules, rulings=rulings, categories=("food",), people=(), fx_rates=())
 
 
 def test_owners_round_trip(conn):
     owners = (owner("a", budget=True, counterparty_strings=("ann", "a b")), owner("b", budget=False))
     _replace(conn, owners, (replace(account(), owner="a"),))
-    got = db.load_inputs(conn).owners
+    got = db.load_inputs(conn, today=TODAY).owners
     assert got == owners
     assert isinstance(got[0].counterparty_strings, tuple)
 
@@ -153,7 +153,7 @@ def test_second_budget_owner_is_rejected_by_db(conn):
 def test_cash_from_round_trip(conn):
     cash = replace(account("cash1"), cash_from=date(2026, 11, 1))
     _replace(conn, (owner(),), (account(), cash))
-    got = {a.id: a.cash_from for a in db.load_inputs(conn).accounts}
+    got = {a.id: a.cash_from for a in db.load_inputs(conn, today=TODAY).accounts}
     assert got == {"acc1": None, "cash1": date(2026, 11, 1)}
 
 
@@ -166,7 +166,7 @@ def test_exclude_rule_and_ruling_kinds_round_trip(conn):
     white = Ruling("white_card:t1", "t1", "white_card", {}, "import")
     _replace(conn, (owner(),), (account(),), rules=(exclude_rule,), rulings=(exclude_ruling, white),
              transactions=(tx("t1"),))
-    got = db.load_inputs(conn)
+    got = db.load_inputs(conn, today=TODAY)
     assert got.rules == (exclude_rule,)
     assert got.rules[0].result == {"reason": "miles-to-charity", "paired": True}
     assert got.rulings == (exclude_ruling, white)
@@ -205,20 +205,20 @@ def test_new_rule_and_ruling_kinds_accepted_by_db(conn):
     )
     rulings = tuple(Ruling(f"{k}:t1", "t1", k, {}, "import") for k in ("split", "reimbursement", "debt"))
     _write(conn, rules=rules, rulings=rulings, transactions=(tx("t1"),))
-    assert [r.kind for r in db.load_inputs(conn).rules] == [r.kind for r in rules]
+    assert [r.kind for r in db.load_inputs(conn, today=TODAY).rules] == [r.kind for r in rules]
 
 
 def test_people_round_trip(conn):
-    people = (Person("alice", "Alice", Decimal("12.50"), "a note"), Person("bob", "Bob", Decimal("0.00"), None))
+    people = (person("alice", "Alice", "12.50", "a note"), person("bob", "Bob", "0.00"))
     counts = _write(conn, people=people)
-    assert db.load_inputs(conn).people == people
+    assert db.load_inputs(conn, today=TODAY).people == people
     assert counts["people"] == 2
 
 
 def test_transaction_source_round_trip(conn):
     txs = (tx("t1"), tx("m1", source="manual"))
     _write(conn, transactions=txs)
-    assert {t.id: t.source for t in db.load_inputs(conn).transactions} == {"t1": "bank", "m1": "manual"}
+    assert {t.id: t.source for t in db.load_inputs(conn, today=TODAY).transactions} == {"t1": "bank", "m1": "manual"}
 
 
 def test_reimport_replaces_manual_transaction(conn):
@@ -227,8 +227,80 @@ def test_reimport_replaces_manual_transaction(conn):
     _write(conn, transactions=(first,), rulings=(ruling("manual:manual-1", "manual-1", "food"),))
     _write(conn, transactions=(second,), rulings=(ruling("manual:manual-1", "manual-1", "misc"),),
            categories=("food", "misc"))
-    got = db.load_inputs(conn)
+    got = db.load_inputs(conn, today=TODAY)
     assert [(t.id, t.source, t.amount, t.description) for t in got.transactions] == [
         ("manual-1", "manual", Decimal("25.00"), "edited")
     ]
     assert [(g.id, g.payload["category"]) for g in got.rulings] == [("manual:manual-1", "misc")]
+
+
+def test_fx_rates_round_trip(conn):
+    rates = (
+        FxRate("r1", date(2026, 1, 5), Decimal("41.2500"), "sell", "bank"),
+        FxRate("r2", date(2026, 1, 5), Decimal("41.1000"), "official", "nbu"),
+        FxRate("r3", date(2026, 1, 6), Decimal("41.3333"), "effective", "paired-transfer"),
+        FxRate("r4", date(2026, 1, 7), Decimal("41.4000"), "midpoint", "bank-currency"),
+    )
+    _write(conn, fx_rates=rates)
+    assert db.load_inputs(conn, today=TODAY).fx_rates == rates
+
+
+def test_account_floor_step_and_cash_opening_round_trip(conn):
+    accounts = (
+        replace(account("fop", "USD"), fx_income_floor_step=Decimal("100")),
+        replace(account("cash"), cash_from=date(2026, 11, 1), cash_opening=Decimal("1234.50")),
+        account("plain"),
+    )
+    _write(conn, accounts=accounts)
+    got = {a.id: a for a in db.load_inputs(conn, today=TODAY).accounts}
+    assert got["fop"].fx_income_floor_step == Decimal("100")
+    assert got["cash"].cash_opening == Decimal("1234.50")
+    assert got["plain"].fx_income_floor_step == Decimal("5")
+    assert got["plain"].cash_opening is None
+
+
+def test_attribute_ruling_kind_accepted_by_db(conn):
+    attribute = Ruling("attribute:t1", "t1", "attribute", {"budget_month": "2026-01"}, "import")
+    _write(conn, rulings=(attribute,), transactions=(tx("t1"),))
+    assert db.load_inputs(conn, today=TODAY).rulings == (attribute,)
+
+
+def test_outside_cycle_status_accepted_by_db(conn):
+    entry = replace(_entry("t1", "food"), status="outside_cycle")
+    db.save_ledger(conn, (entry,))
+    assert db.load_ledger(conn) == (entry,)
+
+
+def test_ledger_entry_fx_columns_round_trip(conn):
+    entry = replace(
+        _entry("t1", "food"), budget_month="2026-01", amount_uah=Decimal("-415.00"),
+        rate=Decimal("41.5000"), rate_kind="sell",
+    )
+    bare = _entry("t2", "food")
+    db.save_ledger(conn, (entry, bare))
+    assert db.load_ledger(conn) == (entry, bare)
+    assert (bare.budget_month, bare.amount_uah, bare.rate, bare.rate_kind) == (None, None, None, None)
+
+
+def test_save_ledger_writes_cycle_and_fx_columns(conn):
+    usd = replace(
+        _entry("t1", "food"), currency="USD", budget_month="2026-01", amount_uah=Decimal("-415.00"),
+        rate=Decimal("41.5000"), rate_kind="sell",
+    )
+    outside = replace(_entry("t2", "food"), status="outside_cycle")
+    db.save_ledger(conn, (usd, outside))
+    rows = conn.execute(
+        "select transaction_id, status, budget_month, amount_uah, rate, rate_kind"
+        " from ledger_entries order by transaction_id"
+    ).fetchall()
+    assert rows == [
+        {"transaction_id": "t1", "status": "kept", "budget_month": "2026-01", "amount_uah": Decimal("-415.00"),
+         "rate": Decimal("41.5000"), "rate_kind": "sell"},
+        {"transaction_id": "t2", "status": "outside_cycle", "budget_month": None, "amount_uah": None,
+         "rate": None, "rate_kind": None},
+    ]
+
+
+def test_load_inputs_carries_today(conn):
+    _write(conn)
+    assert db.load_inputs(conn, today=TODAY).today == TODAY
