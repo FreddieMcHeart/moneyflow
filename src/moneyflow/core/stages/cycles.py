@@ -33,7 +33,7 @@ def _refuse_split(entries: list[LedgerEntry], found: tuple[Cycle, ...]) -> None:
             raise BuildRefused("falls outside every cycle and cannot be split", transaction_id)
     for e in entries:
         cycle = home.get(e.transaction_id)
-        if cycle is not None and e.part >= 1 and cycle_of(found, e.date) != cycle:
+        if cycle is not None and cycle_of(found, e.date) != cycle:
             raise BuildRefused(f"part {e.part} dated {e.date}, outside the row's cycle {describe(cycle)}", e.transaction_id)
 
 

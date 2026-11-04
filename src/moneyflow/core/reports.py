@@ -76,7 +76,8 @@ def _days(cycles: tuple[Cycle, ...], i: int, today: date) -> tuple[int | None, i
     closed = _length(cycles[i])
     if closed is not None:
         return closed, 0
-    total = _length(cycles[i - 1]) if i > 0 else None
+    before = cycles[:i]
+    total = _length(before[-1]) if before else None
     return total, None if total is None else max(0, total - _elapsed(cycles[i], today))
 
 

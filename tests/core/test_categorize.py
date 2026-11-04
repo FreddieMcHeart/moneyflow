@@ -1,8 +1,11 @@
+from dataclasses import replace
+
 import pytest
 
 from moneyflow.core.build import build
 from moneyflow.core.model import BuildRefused
 from moneyflow.core.stages.categorize import categorize
+from moneyflow.core.stages.ingest import ingest
 from tests.core._builders import inputs, rule, ruling, tx
 
 
@@ -128,3 +131,11 @@ def test_category_ruling_on_excluded_entry_still_refuses():
     rulings = (exclude_ruling("x1", "t1", "cash-withdrawal"), ruling("g1", "t1", "food"))
     with pytest.raises(BuildRefused, match="ruling on an excluded entry"):
         build(inputs(transactions=(tx(),), rulings=rulings))
+
+
+@pytest.mark.parametrize("changes", [{}, {"via": "rule:x", "status": "excluded", "reason": "internal-transfer"}])
+def test_an_entry_no_rule_places_is_marked_unmatched_only_when_reclassified_and_open(changes):
+    inp = inputs(transactions=(tx(),), rules=(rule("r0", 10, 0, "food", description_contains="zzz"),))
+    (entry,) = ingest([], inp)
+    entry = replace(entry, **changes)
+    assert categorize([entry], inp) == [entry]

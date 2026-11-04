@@ -6,7 +6,7 @@ from decimal import Decimal
 import pytest
 
 from moneyflow.core.build import build
-from moneyflow.core.model import BuildRefused
+from moneyflow.core.model import BuildRefused, Ruling
 from tests.core._builders import exclude_ruling, inputs, rule, ruling, split_ruling, tx
 
 RULES = (rule("r1", 10, 0, "food", description_contains="shop"),)
@@ -111,3 +111,21 @@ def test_split_income_parts_stay_positive():
     )
     kept = [e for e in build(inp) if e.status == "kept"]
     assert [e.amount for e in kept] == [Decimal("30.00"), Decimal("70.00")]
+
+
+def test_split_ruling_id_without_a_colon_refuses():
+    bad = Ruling(id="nopart", transaction_id="t1", kind="split", payload={"amount": "30.00", "category": "misc"}, created_by="test")
+    with pytest.raises(BuildRefused, match="id does not end in a part number") as refused:
+        _build([bad])
+    assert refused.value.transaction_id == "t1"
+
+
+@pytest.mark.parametrize("amount", ["1.00", "0.50"])
+def test_split_part_amount_of_one_or_less_is_allowed(amount):
+    ledger = _build([split_ruling("t1", 1, amount, "misc")])
+    assert [(e.part, e.status, e.amount) for e in ledger if e.part == 1] == [(1, "kept", -Decimal(amount))]
+
+
+def test_split_remainder_below_one_is_still_emitted():
+    ledger = _build([split_ruling("t1", 1, "99.50", "misc")])
+    assert [(e.part, e.amount) for e in ledger] == [(0, Decimal("-100.00")), (1, Decimal("-99.50")), (2, Decimal("-0.50"))]

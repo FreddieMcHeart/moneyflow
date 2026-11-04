@@ -114,6 +114,13 @@ def test_excluded_entry_has_no_budget_month():
     assert (off.status, off.budget_month) == ("excluded", None)
 
 
+def test_excluded_row_before_first_cycle_is_not_a_split_parent():
+    """Only an excluded row WITH the split reason is a split parent; any other excluded row may sit outside every cycle."""
+    inp = _inputs([_salary("a", 1, 10), tx("off", account_id="off", day=5)], [attribute_ruling("a", "2026-01")], ACCOUNTS + (account("off", include=False),))
+    off = _by_id(build(inp))["off"]
+    assert (off.status, off.budget_month) == ("excluded", None)
+
+
 def test_reimbursement_never_anchors():
     rulings = [attribute_ruling("a", "2026-01"), reimbursement_ruling("r", "food")]
     ledger = build(_inputs([_salary("a", 1, 10), _salary("r", 2, 1)], rulings))
