@@ -10,11 +10,14 @@ from moneyflow.core.model import Ruling
 from moneyflow.storage import db
 from tools.import_old.read import (
     read_accounts,
+    read_attribute_rulings,
     read_cash,
     read_categories,
     read_debt_rulings,
     read_exclude_rules,
     read_exclude_rulings,
+    read_fx_floor_steps,
+    read_fx_rates,
     read_manual_transactions,
     read_overrides,
     read_owners,
@@ -45,11 +48,15 @@ def run(old_repo: Path, conn: psycopg.Connection) -> dict[str, int]:
     """
     data = Path(old_repo) / "data"
     source = Path(old_repo) / "scripts" / "python" / "finance"
-    cash_account, cash_from = read_cash(source / "cash.py")
+    cash_account, cash_from, cash_opening = read_cash(source / "cash.py")
     read = read_accounts(data / "accounts.yaml")
     if cash_account not in {a.id for a in read}:
         raise ValueError(f"cash account {cash_account!r} is not among the imported accounts")
-    accounts = tuple(replace(a, cash_from=cash_from) if a.id == cash_account else a for a in read)
+    steps = read_fx_floor_steps(source / "fx.py", read)
+    accounts = tuple(
+        replace(a, fx_income_floor_step=steps[a.id], **({"cash_from": cash_from, "cash_opening": cash_opening} if a.id == cash_account else {}))
+        for a in read
+    )
     manual = data / "manual.yaml"
     manual_transactions, manual_rulings = read_manual_transactions(manual, accounts)
     transactions = read_raw(data / "monobank_import", accounts) + manual_transactions
@@ -67,6 +74,11 @@ def run(old_repo: Path, conn: psycopg.Connection) -> dict[str, int]:
     rulings: tuple[Ruling, ...] = ()
     for label, group in groups:
         rulings += _report_absent(label, group, known)
+    attribution = read_attribute_rulings(manual)
+    absent = [g.transaction_id for g in attribution if g.transaction_id not in known]
+    if absent:
+        raise ValueError(f"attribution entries for {len(absent)} transactions not in the raw files: {', '.join(absent)}")
+    rulings += attribution
     stale = db.stale_transaction_ids(conn, known)
     print(f"not in source: {len(stale)} stored transactions")
     for tid in stale:
@@ -82,7 +94,7 @@ def run(old_repo: Path, conn: psycopg.Connection) -> dict[str, int]:
         rulings=rulings,
         categories=read_categories(data / "categories.yaml"),
         people=read_people(manual),
-        fx_rates=(),  # BRIDGE T2-B1: no rates imported yet; Task 8 removes it
+        fx_rates=read_fx_rates(data / "history" / "usd_rate.csv"),
     )
     for table, n in counts.items():
         print(f"{table}: {n}")
@@ -90,6 +102,7 @@ def run(old_repo: Path, conn: psycopg.Connection) -> dict[str, int]:
     print(f"imported reclassify rules: {len(reclassify_rules)}")
     for kind, group in groups[1:]:
         print(f"imported {kind}: {sum(1 for g in group if g.transaction_id in known)}")
+    print(f"imported attribute rulings: {len(attribution)}")
     return counts
 
 

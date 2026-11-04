@@ -21,10 +21,17 @@ _HEADER_UAH = "date,time,amount_uah,direction,mcc,description,comment,category,i
 _OWNERS = {"o": {"display": "Owner O", "counterparty_strings": ["o-card", "o-name"]}}
 
 _CASH_SOURCE = """from datetime import date
+from decimal import Decimal
 
 CASH_CUTOVER = date(2026, 11, 1)
+CASH_OPENING = Decimal("250.50")
 CASH_ACCOUNT = "cash-test"
 """
+
+_FX_SOURCE = """FOP_USD_ACCOUNT = "fop-test"
+"""
+
+_FX_HEADER = "row_id,supersedes,date,rate,kind,method,source_ids,observed_at,note"
 
 _REFUNDS_SOURCE = """REFUND_PREFIX = "Скасування."
 """
@@ -82,6 +89,7 @@ def _old_repo(
     manual: dict | None = None,
     exclusions_source: str = _EXCLUSIONS_SOURCE,
     with_cash_account: bool = True,
+    fx_rows: tuple[str, ...] = (),
 ) -> Path:
     if with_cash_account and "cash-test" not in {a[0] for a in accounts}:
         accounts = (*accounts, ("cash-test", "UAH", True))
@@ -90,6 +98,9 @@ def _old_repo(
     finance = tmp_path / "old" / "scripts" / "python" / "finance"
     finance.mkdir(parents=True)
     (finance / "cash.py").write_text(_CASH_SOURCE)
+    (finance / "fx.py").write_text(_FX_SOURCE)
+    (data / "history").mkdir()
+    (data / "history" / "usd_rate.csv").write_text("\n".join([_FX_HEADER, *fx_rows]) + "\n")
     (finance / "exclusions.py").write_text(exclusions_source)
     (finance / "refunds.py").write_text(_REFUNDS_SOURCE)
     (finance / "investment_withdrawals.py").write_text(_INVESTMENT_SOURCE)
@@ -603,3 +614,79 @@ def test_reimport_of_exclude_inputs_is_idempotent(conn, tmp_path):
     second = run(repo, conn)
     assert second == first
     assert {(g.id, g.kind) for g in db.load_inputs(conn, today=TODAY).rulings} == stored
+
+
+_INCOME = "2026-01-{day:02d},2026-01-{day:02d}T12:00:00+02:00,{amount},UAH,income,5411,salary,,,{tid}"
+
+
+def _attribution_repo(tmp_path, attribution):
+    return _old_repo(
+        tmp_path,
+        files={"acc1_2026-01-01_2026-01-31.csv": _csv(_row("t1", direction="income"), _row("t2"))},
+        manual={"attribution": attribution},
+    )
+
+
+def test_attribution_becomes_attribute_rulings(conn, tmp_path):
+    run(_attribution_repo(tmp_path, {"t1": "2026-01"}), conn)
+    got = [r for r in db.load_inputs(conn, today=TODAY).rulings if r.kind == "attribute"]
+    assert [(r.id, r.transaction_id, r.payload, r.created_by) for r in got] == [
+        ("attribute:t1", "t1", {"budget_month": "2026-01"}, "import"),
+    ]
+
+
+def test_attribution_on_unknown_tx_refuses(conn, tmp_path):
+    with pytest.raises(ValueError, match="attribution.*ghost"):
+        run(_attribution_repo(tmp_path, {"t1": "2026-01", "ghost": "2026-02"}), conn)
+
+
+def _fx_repo(tmp_path, *rows):
+    return _old_repo(tmp_path, fx_rows=rows)
+
+
+_RATE_A = "aaaaaaaaaaaa,,2026-01-07,41.0000,official,test-a,s1,,"
+_RATE_B = "bbbbbbbbbbbb,,2026-01-07,41.2500,sell,test-b,,2026-01-07T10:00:00,note"
+
+
+def test_fx_rates_imported_with_row_id(conn, tmp_path):
+    run(_fx_repo(tmp_path, _RATE_A, _RATE_B), conn)
+    got = sorted((x.id, x.date, x.rate, x.kind, x.method) for x in db.load_inputs(conn, today=TODAY).fx_rates)
+    assert got == [
+        ("aaaaaaaaaaaa", date(2026, 1, 7), Decimal("41.0000"), "official", "test-a"),
+        ("bbbbbbbbbbbb", date(2026, 1, 7), Decimal("41.2500"), "sell", "test-b"),
+    ]
+
+
+def test_duplicate_fx_row_id_refuses(conn, tmp_path):
+    with pytest.raises(ValueError, match="duplicate.*aaaaaaaaaaaa"):
+        run(_fx_repo(tmp_path, _RATE_A, _RATE_A), conn)
+
+
+def test_reimport_replaces_fx_rates(conn, tmp_path):
+    run(_fx_repo(tmp_path, _RATE_A, _RATE_B), conn)
+    other = tmp_path / "second"
+    other.mkdir()
+    run(_fx_repo(other, _RATE_B), conn)
+    assert [x.id for x in db.load_inputs(conn, today=TODAY).fx_rates] == ["bbbbbbbbbbbb"]
+
+
+def _accounts_after_import(conn, tmp_path):
+    repo = _old_repo(tmp_path, accounts=(("acc1", "UAH", True), ("fop-test", "USD", True)))
+    run(repo, conn)
+    return {a.id: a for a in db.load_inputs(conn, today=TODAY).accounts}
+
+
+def test_fop_account_gets_floor_step_100(conn, tmp_path):
+    assert _accounts_after_import(conn, tmp_path)["fop-test"].fx_income_floor_step == Decimal("100")
+
+
+def test_other_accounts_get_floor_step_5(conn, tmp_path):
+    got = _accounts_after_import(conn, tmp_path)
+    assert {i: a.fx_income_floor_step for i, a in got.items() if i != "fop-test"} == {"acc1": Decimal("5"), "cash-test": Decimal("5")}
+
+
+def test_cash_opening_imported_on_cash_account(conn, tmp_path):
+    got = _accounts_after_import(conn, tmp_path)
+    assert got["cash-test"].cash_opening == Decimal("250.50")
+    assert got["cash-test"].cash_from == date(2026, 11, 1)
+    assert got["acc1"].cash_opening is None
