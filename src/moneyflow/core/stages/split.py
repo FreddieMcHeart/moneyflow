@@ -1,4 +1,4 @@
-"""A29: split a kept transaction into parts; the remainder keeps the parent's own category."""
+"""A29: split a kept or unresolved transaction into parts; the remainder keeps the parent's own category, or none."""
 
 from dataclasses import replace
 
@@ -26,6 +26,8 @@ def _part(parent: LedgerEntry, part: SplitPart, inputs: Inputs) -> LedgerEntry:
     return replace(
         parent,
         part=part.n,
+        status="kept",
+        reason=None,
         date=part.date or parent.date,
         amount=part.amount,
         category=part.category,
@@ -36,7 +38,7 @@ def _part(parent: LedgerEntry, part: SplitPart, inputs: Inputs) -> LedgerEntry:
 
 
 def _split_entry(parent: LedgerEntry, parts: list[SplitPart], inputs: Inputs) -> list[LedgerEntry]:
-    if parent.status != "kept":
+    if parent.status == "excluded":
         raise BuildRefused(f"split ruling on an {parent.status} entry", parent.transaction_id)
     remainder = parent.amount - sum((p.amount for p in parts), start=parent.amount * 0)
     if remainder < 0:

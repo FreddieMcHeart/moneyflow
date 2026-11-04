@@ -68,10 +68,21 @@ def test_split_on_excluded_entry_refuses():
         _build(rulings)
 
 
-def test_split_on_unresolved_entry_refuses():
-    inp = inputs(transactions=(tx(description="other"),), rules=RULES, rulings=(split_ruling("t1", 1, "30.00", "misc"),))
-    with pytest.raises(BuildRefused, match="split ruling on an unresolved entry"):
-        build(inp)
+def _unresolved(rulings):
+    return build(inputs(transactions=(tx(description="other", amount="100.00"),), rules=RULES, rulings=tuple(rulings)))
+
+
+def test_split_on_unresolved_parent_with_full_split_leaves_nothing_unresolved():
+    ledger = _unresolved([split_ruling("t1", 1, "60.00", "misc"), split_ruling("t1", 2, "40.00", "misc")])
+    assert [(e.part, e.status, e.reason) for e in ledger] == [(0, "excluded", "split"), (1, "kept", None), (2, "kept", None)]
+    assert not [e for e in ledger if e.status == "unresolved"]
+
+
+def test_split_on_unresolved_parent_leaves_the_remainder_unresolved():
+    ledger = _unresolved([split_ruling("t1", 1, "30.00", "misc")])
+    unresolved = [e for e in ledger if e.status == "unresolved"]
+    assert [(e.part, e.amount, e.category, e.decided_by) for e in unresolved] == [(2, Decimal("-70.00"), None, None)]
+    assert [(e.part, e.status, e.reason) for e in ledger if e.part < 2] == [(0, "excluded", "split"), (1, "kept", None)]
 
 
 def test_split_part_date_defaults_to_parent():
