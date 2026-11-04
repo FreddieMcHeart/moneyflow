@@ -8,8 +8,8 @@ from moneyflow.core.model import Account, Inputs, Owner, Person, Rule, Ruling, T
 TODAY = date(2026, 1, 31)
 
 
-def account(id: str = "acc1", currency: str = "UAH", include: bool = True) -> Account:
-    return Account(id=id, name=id, currency=currency, owner="o", role="main", include=include, cash_from=None,
+def account(id: str = "acc1", currency: str = "UAH", include: bool = True, role: str = "main") -> Account:
+    return Account(id=id, name=id, currency=currency, owner="o", role=role, include=include, cash_from=None,
                    fx_income_floor_step=Decimal("5"), cash_opening=None)
 
 
@@ -26,12 +26,14 @@ def tx(
     description: str = "shop",
     day: int = 1,
     source: str = "bank",
+    month: int = 1,
+    hour: int = 12,
 ) -> Transaction:
     return Transaction(
         id=id,
         account_id=account_id,
-        date=date(2026, 1, day),
-        time=datetime(2026, 1, day, 12, 0),
+        date=date(2026, month, day),
+        time=datetime(2026, month, day, hour, 0),
         amount=Decimal(amount),
         currency=currency,
         direction=direction,  # type: ignore[arg-type]
@@ -102,6 +104,16 @@ def debt_ruling(transaction_id: str, person: str = "alice", kind: str = "lent", 
         transaction_id=transaction_id,
         kind="debt",
         payload={"person": person, "kind": kind},
+        created_by="test",
+    )
+
+
+def attribute_ruling(transaction_id: str, month: str | None) -> Ruling:
+    return Ruling(
+        id=f"attribute:{transaction_id}",
+        transaction_id=transaction_id,
+        kind="attribute",
+        payload={"budget_month": month},
         created_by="test",
     )
 
