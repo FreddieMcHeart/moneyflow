@@ -55,11 +55,18 @@ def _shadow_ok(rule: str, new: LedgerEntry) -> bool:
     return _via_rule(new) and new.decided_by == expected
 
 
+def _ruling_ok(rule: str, new: LedgerEntry) -> bool:
+    prefix = _RULING_PREFIXES[rule]
+    if rule.startswith("manual-"):
+        return new.decided_by is not None and new.decided_by.startswith(prefix)
+    return new.via is not None and new.via == new.decided_by and new.via.startswith(prefix)
+
+
 def _decision_ok(rule: str, bucket: str, new: LedgerEntry) -> bool:
     checks = {
         "rule": lambda: new.decided_by == f"rule:{rule}",
         "override": lambda: new.decided_by is not None and new.decided_by.startswith("ruling:"),
-        "ruling": lambda: new.via is not None and new.via == new.decided_by and new.via.startswith(_RULING_PREFIXES.get(rule, "")),
+        "ruling": lambda: _ruling_ok(rule, new),
         "shadow": lambda: _shadow_ok(rule, new),
         "return": lambda: _via_rule(new) and new.decided_by == f"rule:{rule}",
     }

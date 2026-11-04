@@ -313,11 +313,30 @@ def test_ruling_buckets_checked_through_via():
            _old("m", "Food", "", "manual-expense", amount="9.00")]
     new = (
         _newe("d", 0, "Debts", "alice", "ruling:debt:d", "-40.00", via="ruling:debt:d"),
-        _newe("m", 0, "Food", None, "ruling:manual:m", "-9.00", via="ruling:manual:m"),
+        _newe("m", 0, "Food", None, "ruling:manual:m", "-9.00", via=None),
     )
     assert compare(old, set(), {"d", "m"}, new).differ == []
     bad = (replace(new[0], decided_by="rule:x", via=None), new[1])
     assert compare(old, set(), {"d", "m"}, bad).differ == [("d", "decided_by")]
+
+
+def test_manual_expense_from_real_build_has_no_differ():
+    from moneyflow.core.build import build
+    from tests.core._builders import inputs, ruling, tx
+    led = build(inputs(transactions=(tx("m", source="manual"),), rulings=(ruling("manual:m", "m", "food"),)))
+    old = [_old("m", "food", "", "manual-expense", amount="10.00")]
+    assert compare(old, set(), {"m"}, led).differ == []
+    assert compare(old, set(), {"m"}, (replace(led[0], decided_by="rule:x"),)).differ == [("m", "decided_by")]
+
+
+@pytest.mark.parametrize("rule,by", [("reimbursement:manual", "ruling:reimbursement:a"), ("debt:manual", "ruling:debt:a")])
+def test_reimbursement_and_debt_need_matching_via(rule, by):
+    old = [_old("a", "Fuel", "", rule, amount="100.00", direction="reimbursement" if rule.startswith("re") else "expense")]
+    sign = "100.00" if rule.startswith("re") else "-100.00"
+    ok = _newe("a", 0, "Fuel", None, by, sign, via=by, direction="reimbursement" if rule.startswith("re") else "expense")
+    assert compare(old, set(), {"a"}, (ok,)).differ == []
+    assert compare(old, set(), {"a"}, (replace(ok, via=None),)).differ == [("a", "decided_by")]
+    assert compare(old, set(), {"a"}, (replace(ok, via="ruling:other:a"),)).differ == [("a", "decided_by")]
 
 
 def test_reimbursement_signed_positive():
