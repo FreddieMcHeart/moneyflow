@@ -28,6 +28,8 @@ def entry(
         status=status,  # type: ignore[arg-type]
         reason=None,
         decided_by=None,
+        direction="expense",
+        via=None,
     )
 
 

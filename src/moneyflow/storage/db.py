@@ -10,9 +10,9 @@ from alembic.config import Config
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
-from moneyflow.core.model import Account, Inputs, Ledger, LedgerEntry, Owner, Rule, Ruling, Transaction
+from moneyflow.core.model import Account, Inputs, Ledger, LedgerEntry, Owner, Person, Rule, Ruling, Transaction
 
-_TABLES = ("owners", "accounts", "transactions", "rules", "rulings", "categories")
+_TABLES = ("owners", "accounts", "transactions", "rules", "rulings", "categories", "people")
 _ALEMBIC_INI = Path(__file__).resolve().parents[3] / "alembic.ini"
 
 
@@ -44,7 +44,12 @@ def _transaction(r: dict) -> Transaction:
         id=r["id"], account_id=r["account_id"], date=r["date"], time=_naive_utc(r["time"]),
         amount=r["amount"], currency=r["currency"], direction=r["direction"], mcc=r["mcc"],
         description=r["description"], comment=r["comment"],
+        source=r["source"],
     )
+
+
+def _person(r: dict) -> Person:
+    return Person(r["id"], r["display"], r["opening_balance"], r["note"])
 
 
 def _rule(r: dict) -> Rule:
@@ -58,7 +63,7 @@ def _ruling(r: dict) -> Ruling:
 def _entry(r: dict) -> LedgerEntry:
     return LedgerEntry(
         r["transaction_id"], r["part"], r["date"], r["account_id"], r["category"], r["subcategory"],
-        r["amount"], r["currency"], r["status"], r["reason"], r["decided_by"],
+        r["amount"], r["currency"], r["status"], r["reason"], r["decided_by"], r["direction"], r["via"],
     )
 
 
@@ -79,6 +84,7 @@ def load_inputs(conn: psycopg.Connection) -> Inputs:
             ),
             rulings=tuple(_ruling(r) for r in _rows(conn, "select * from rulings order by id")),
             categories=frozenset(r["name"] for r in _rows(conn, "select name from categories")),
+            people=tuple(_person(r) for r in _rows(conn, "select * from people order by id")),
         )
 
 
@@ -94,7 +100,7 @@ def save_ledger(conn: psycopg.Connection, ledger: Ledger) -> None:
     """Replace the stored ledger in one transaction."""
     rows = [
         (e.transaction_id, e.part, e.date, e.account_id, e.category, e.subcategory, e.amount,
-         e.currency, e.status, e.reason, e.decided_by)
+         e.currency, e.status, e.reason, e.decided_by, e.direction, e.via)
         for e in ledger
     ]
     with conn.transaction():
@@ -102,7 +108,8 @@ def save_ledger(conn: psycopg.Connection, ledger: Ledger) -> None:
         with conn.cursor() as cur:
             cur.executemany(
                 "insert into ledger_entries (transaction_id, part, date, account_id, category, subcategory,"
-                " amount, currency, status, reason, decided_by) values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                " amount, currency, status, reason, decided_by, direction, via)"
+                " values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
                 rows,
             )
 
@@ -142,14 +149,35 @@ def _upsert_facts(
     _insert_many(
         conn,
         "insert into transactions (id, account_id, date, time, amount, currency, direction, mcc,"
-        " description, comment) values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)"
+        " description, comment, source) values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)"
         " on conflict (id) do update set account_id=excluded.account_id, date=excluded.date,"
         " time=excluded.time, amount=excluded.amount, currency=excluded.currency,"
         " direction=excluded.direction, mcc=excluded.mcc, description=excluded.description,"
-        " comment=excluded.comment",
+        " comment=excluded.comment, source=excluded.source",
         ((t.id, t.account_id, t.date, t.time, t.amount, t.currency, t.direction, t.mcc,
-          t.description, t.comment) for t in transactions),
+          t.description, t.comment, t.source) for t in transactions),
     )
+
+
+class ImportCollision(Exception):
+    """An incoming import ruling reuses the id of a ruling the operator created."""
+
+    def __init__(self, ruling_id: str) -> None:
+        super().__init__(f"import ruling {ruling_id!r} collides with an operator ruling of the same id")
+        self.ruling_id = ruling_id
+
+
+def _refuse_operator_collision(conn: psycopg.Connection, rulings: tuple[Ruling, ...]) -> None:
+    held = {
+        r["id"]
+        for r in conn.execute(
+            "select id from rulings where created_by <> 'import' and id = any(%s)",
+            ([g.id for g in rulings],),
+        ).fetchall()
+    }
+    for g in rulings:
+        if g.id in held:
+            raise ImportCollision(g.id)
 
 
 def _replace_decisions(
@@ -157,19 +185,28 @@ def _replace_decisions(
     rules: Iterable[Rule],
     rulings: Iterable[Ruling],
     categories: Iterable[str],
+    people: Iterable[Person],
     transaction_ids: list[str],
 ) -> None:
+    rulings = tuple(rulings)
+    _refuse_operator_collision(conn, rulings)
     # An import ruling on a transaction missing from the source (stale) is kept: it is still that
-    # transaction's decision. Rules and categories are replaced whole, as before.
+    # transaction's decision. Rules, categories and people are replaced whole, as before.
     conn.execute(
         "delete from rulings where created_by = 'import' and transaction_id = any(%s)", (transaction_ids,)
     )
     for table in ("rules", "categories"):
         conn.execute(f"delete from {table} where created_by = 'import'")  # type: ignore[arg-type]
+    conn.execute("delete from people")  # people have no operator rows yet; replaced whole
     _insert_many(
         conn,
         "insert into categories (name, created_by) values (%s, 'import')",
         ((c,) for c in categories),
+    )
+    _insert_many(
+        conn,
+        "insert into people (id, display, opening_balance, note) values (%s,%s,%s,%s)",
+        ((p.id, p.display, p.opening_balance, p.note) for p in people),
     )
     _insert_many(
         conn,
@@ -194,6 +231,7 @@ def replace_imported(
     rules: Iterable[Rule],
     rulings: Iterable[Ruling],
     categories: Iterable[str],
+    people: Iterable[Person],
 ) -> dict[str, int]:
     """One transaction: upsert facts by id, replace the `import` decision rows, return counts per table.
 
@@ -204,5 +242,5 @@ def replace_imported(
     transactions = tuple(transactions)
     with conn.transaction():
         _upsert_facts(conn, owners, accounts, transactions)
-        _replace_decisions(conn, rules, rulings, categories, [t.id for t in transactions])
+        _replace_decisions(conn, rules, rulings, categories, people, [t.id for t in transactions])
         return {t: _rows(conn, f"select count(*) as n from {t}")[0]["n"] for t in _TABLES}  # type: ignore[arg-type]

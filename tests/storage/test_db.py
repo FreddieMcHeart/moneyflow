@@ -1,23 +1,21 @@
 from dataclasses import replace
+from datetime import date
 from decimal import Decimal
 
 import psycopg
 import pytest
 
-from moneyflow.core.model import LedgerEntry
+from moneyflow.core.model import LedgerEntry, Person, Ruling
 from moneyflow.storage import db
-from datetime import date
-
-from moneyflow.core.model import Ruling
 from tests.core._builders import account, owner, rule, ruling, tx
 
 
 def _entry(tid: str, category: str, amount: str = "-10.00") -> LedgerEntry:
     t = tx(tid)
-    return LedgerEntry(tid, 0, t.date, "acc1", category, None, Decimal(amount), "UAH", "kept", None, "rule:r1")
+    return LedgerEntry(tid, 0, t.date, "acc1", category, None, Decimal(amount), "UAH", "kept", None, "rule:r1", "expense", None)
 
 
-def _write(conn, rules=(), rulings=(), transactions=(), categories=("food",)):
+def _write(conn, rules=(), rulings=(), transactions=(), categories=("food",), people=()):
     return db.replace_imported(
         conn,
         owners=(owner(),),
@@ -26,6 +24,7 @@ def _write(conn, rules=(), rulings=(), transactions=(), categories=("food",)):
         rules=rules,
         rulings=rulings,
         categories=categories,
+        people=people,
     )
 
 
@@ -48,7 +47,7 @@ def test_round_trip_inputs(conn):
     assert got.rules[0].result == {"category": "food", "subcategory": "cafe"}
     assert got.rulings == rulings
     assert got.categories == frozenset({"food", "misc"})
-    assert counts == {"owners": 1, "accounts": 1, "transactions": 2, "rules": 1, "rulings": 1, "categories": 2}
+    assert counts == {"owners": 1, "accounts": 1, "transactions": 2, "rules": 1, "rulings": 1, "categories": 2, "people": 0}
 
 
 def test_inactive_rules_are_not_loaded(conn):
@@ -104,7 +103,7 @@ def test_load_inputs_reads_one_snapshot(conn, db_url, monkeypatch):
             calls.append(query)  # before the insert: replace_imported below calls _rows too
             with db.connect(db_url) as other:
                 db.replace_imported(other, owners=(owner(),), accounts=(account(),), transactions=(tx("t1"), tx("t2")),
-                                    rules=(), rulings=(), categories=("food",))
+                                    rules=(), rulings=(), categories=("food",), people=())
         return got
 
     monkeypatch.setattr(db, "_rows", rows_then_concurrent_insert)
@@ -133,7 +132,7 @@ def test_reimport_replaces_ruling_of_transaction_still_in_source(conn):
 def _replace(conn, owners, accounts, rules=(), rulings=(), transactions=()):
     return db.replace_imported(
         conn, owners=owners, accounts=accounts, transactions=transactions,
-        rules=rules, rulings=rulings, categories=("food",),
+        rules=rules, rulings=rulings, categories=("food",), people=(),
     )
 
 
@@ -177,3 +176,59 @@ def test_exclude_rule_and_ruling_kinds_round_trip(conn):
 def test_account_with_unknown_owner_is_rejected_by_db(conn):
     with pytest.raises(psycopg.errors.ForeignKeyViolation):
         _replace(conn, (owner("a"),), (replace(account(), owner="ghost"),))
+
+
+def test_reimport_with_ruling_id_held_by_operator_raises_import_collision(conn):
+    t1 = tx("t1")
+    _write(conn, transactions=(t1,))
+    conn.execute(
+        "insert into rulings (id, transaction_id, kind, payload, created_by)"
+        " values ('override:t1', 't1', 'category', '{\"category\": \"misc\", \"subcategory\": null}', 'operator')"
+    )
+    with pytest.raises(db.ImportCollision) as err:
+        _write(conn, transactions=(t1,), rulings=(ruling("override:t1", "t1", "food"),))
+    assert err.value.ruling_id == "override:t1"
+    rows = conn.execute("select id, created_by from rulings").fetchall()
+    assert [(r["id"], r["created_by"]) for r in rows] == [("override:t1", "operator")]
+
+
+def test_unknown_rule_kind_rejected_by_db(conn):
+    bad = replace(rule("r1", 10, 0, "food", None, description_contains="x"), kind="bogus", created_by="import")
+    with pytest.raises(psycopg.errors.CheckViolation):
+        _write(conn, rules=(bad,))
+
+
+def test_new_rule_and_ruling_kinds_accepted_by_db(conn):
+    rules = tuple(
+        replace(rule(f"r{i}", 10, i, "food", None, description_contains="x"), kind=k, created_by="import")
+        for i, k in enumerate(("credit_repayment", "cancellation", "person_return", "investment_withdrawal"))
+    )
+    rulings = tuple(Ruling(f"{k}:t1", "t1", k, {}, "import") for k in ("split", "reimbursement", "debt"))
+    _write(conn, rules=rules, rulings=rulings, transactions=(tx("t1"),))
+    assert [r.kind for r in db.load_inputs(conn).rules] == [r.kind for r in rules]
+
+
+def test_people_round_trip(conn):
+    people = (Person("alice", "Alice", Decimal("12.50"), "a note"), Person("bob", "Bob", Decimal("0.00"), None))
+    counts = _write(conn, people=people)
+    assert db.load_inputs(conn).people == people
+    assert counts["people"] == 2
+
+
+def test_transaction_source_round_trip(conn):
+    txs = (tx("t1"), tx("m1", source="manual"))
+    _write(conn, transactions=txs)
+    assert {t.id: t.source for t in db.load_inputs(conn).transactions} == {"t1": "bank", "m1": "manual"}
+
+
+def test_reimport_replaces_manual_transaction(conn):
+    first = tx("manual-1", amount="10.00", source="manual")
+    second = replace(first, amount=Decimal("25.00"), description="edited")
+    _write(conn, transactions=(first,), rulings=(ruling("manual:manual-1", "manual-1", "food"),))
+    _write(conn, transactions=(second,), rulings=(ruling("manual:manual-1", "manual-1", "misc"),),
+           categories=("food", "misc"))
+    got = db.load_inputs(conn)
+    assert [(t.id, t.source, t.amount, t.description) for t in got.transactions] == [
+        ("manual-1", "manual", Decimal("25.00"), "edited")
+    ]
+    assert [(g.id, g.payload["category"]) for g in got.rulings] == [("manual:manual-1", "misc")]

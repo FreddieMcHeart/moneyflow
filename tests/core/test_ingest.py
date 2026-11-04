@@ -4,7 +4,7 @@ import pytest
 
 from moneyflow.core.model import BuildRefused
 from moneyflow.core.stages.ingest import ingest
-from tests.core._builders import account, inputs, ruling, tx, white_card_ruling
+from tests.core._builders import account, inputs, ruling, split_ruling, tx, white_card_ruling
 
 
 def test_unknown_account_refuses():
@@ -43,11 +43,17 @@ def test_ingest_shape():
     assert entry.account_id == "acc1"
 
 
-def test_white_card_without_category_ruling_refuses():
+def test_white_card_without_category_or_split_ruling_refuses():
     inp = inputs(transactions=(tx(),), rulings=(white_card_ruling("white_card:t1", "t1"),))
-    with pytest.raises(BuildRefused, match="white-card leg without a category ruling") as refused:
+    with pytest.raises(BuildRefused, match="white-card leg without a category or split ruling") as refused:
         ingest([], inp)
     assert refused.value.transaction_id == "t1"
+
+
+def test_white_card_with_split_and_no_category_ruling_builds():
+    rulings = (white_card_ruling("white_card:t1", "t1"), split_ruling("t1", 1, "4.00", "misc"))
+    (entry,) = ingest([], inputs(transactions=(tx(),), rulings=rulings))
+    assert entry.status == "unresolved"
 
 
 def test_white_card_with_split_pending_ruling_passes_a4():

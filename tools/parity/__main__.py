@@ -35,12 +35,12 @@ def exit_code(result: ParityResult, excluded: ExcludedParityResult) -> int:
 
 
 def excluded_clean(r: ExcludedParityResult) -> bool:
-    problems = (r.differ, r.old_kept_excluded, r.next_slice_excluded, r.split_pending_excluded, r.not_included_mismatch)
+    problems = (r.differ, r.old_kept_excluded, r.not_included_mismatch)
     return r.compared > 0 and not any(problems)
 
 
-def _split_pending_ids(inputs) -> set[str]:
-    return {g.transaction_id for g in inputs.rulings if g.id.startswith("split_pending:")}
+def _manual_ids(inputs) -> set[str]:
+    return {t.id for t in inputs.transactions if t.source == "manual"}
 
 
 def _not_included_ids(inputs) -> set[str]:
@@ -67,17 +67,15 @@ def report_excluded(r: ExcludedParityResult) -> None:
     print(f"old kept but new excluded: {len(r.old_kept_excluded)}")
     for (reason,), n in sorted(_tally(r.old_kept_excluded, lambda d: (d[1],)).items()):
         print(f"  by new reason {reason}: {n}")
-    print(f"next slice (old rows): {dict(sorted(r.next_slice.items()))}")
-    print(f"next slice ids excluded in new: {len(r.next_slice_excluded)}")
     print(f"derived ids (with #): {r.derived}")
-    print(f"split pending (kept bucket): {r.split_pending}")
-    print(f"split pending excluded in new: {len(r.split_pending_excluded)}")
+    print(f"excluded out_of_scope: {len(r.out_of_scope)}")
     print(f"account-not-included mismatch: {len(r.not_included_mismatch)}")
 
 
 def report(result: ParityResult) -> None:
     print(f"population: {result.population}")
     print(f"compared: {result.compared}")
+    print(f"parts compared (base ids): {result.parts_compared}")
     print(f"differ: {len(result.differ)}")
     for tid, field in result.differ[:20]:
         print(f"  {tid} {field}")
@@ -94,13 +92,13 @@ def main(argv: list[str] | None = None) -> None:
     with db.connect(args.db) as conn:
         new = db.load_ledger(conn)
         inputs = db.load_inputs(conn)
-    raw = _raw_ids(data)
+    raw = set(_raw_ids(data)) | _manual_ids(inputs)
     result = compare(_old_ledger(data), _rule_names(data), raw, new)
-    excluded = compare_excluded(
-        _read_csv(data / "excluded.csv"), raw, new, _not_included_ids(inputs), _split_pending_ids(inputs)
-    )
+    excluded = compare_excluded(_read_csv(data / "excluded.csv"), raw, new, _not_included_ids(inputs))
     report(result)
     report_excluded(excluded)
+    # Old rows outside budget cycles are not in data/ledger, so neither pass compares them.
+    print(f"old rows outside budget cycles: {len(_read_csv(data / 'outside_cycles.csv'))} (not value-compared)")
     raise SystemExit(exit_code(result, excluded))
 
 

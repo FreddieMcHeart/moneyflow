@@ -39,6 +39,7 @@ def row(id: str, account: str, description: str, amount: str = "100.00", directi
         mcc=None,
         description=description,
         comment="",
+        source="bank",
     )
 
 
@@ -144,7 +145,7 @@ def test_blessed_leg_with_partner_excludes_partner():
     assert run(inp) == {"back": "cross-owner-transfer"}
     got = _reasons(inp)
     assert got["back"] == ("excluded", "cross-owner-transfer")
-    assert got["out"][0] == "excluded"  # the leg keeps its ruling's reason (hand ruling beats every signal)
+    assert got["out"] == ("excluded", "cross-owner-unpaired")  # the leg keeps its ruling's reason (hand ruling beats every signal)
 
 
 def test_blessed_leg_without_partner_is_excluded_and_not_refused():
@@ -275,3 +276,26 @@ def test_an_id_in_both_listings_refuses():
         run(world(white_leg("w", "coffee"), rulings=rulings))
     assert refused.value.transaction_id == "w"
 
+
+
+def test_three_owners_candidate_counted_once():
+    # One income row names two payers. It may be the partner of one key only: the first owner it names
+    # (as the recipient scan does). The other payer's leg then has no partner and refuses.
+    third = Owner(id="third", display="t", counterparty_strings=("Third Test",), budget=False)
+    windows = {"his": (1, 28), "hers": (1, 28), "third-acc": (1, 28)}
+    txs = (
+        row("outB", "hers", OUT, "300.00"),
+        row("outC", "third-acc", OUT, "300.00"),
+        row("both", "his", "From: Owner B Test From: Third Test", "300.00", "income"),
+    )
+    inp = world(*txs, accounts=ACCOUNTS + (acct("third-acc", "third"),), owners=OWNERS + (third,), windows=windows)
+    with pytest.raises(BuildRefused) as refused:
+        run(inp)
+    assert refused.value.transaction_id == "outC"
+
+
+def test_ruled_leg_scan_only_reads_cross_owner_rulings():
+    # A leg excluded by an unrelated ruling reason is decided elsewhere: it is not a leg here, so it
+    # cannot pair with (and exclude) an income row.
+    rulings = (exclude_ruling("exclude:cash-withdrawal:out", "out", "cash-withdrawal"),)
+    assert run(world(*pair(), rulings=rulings)) == {}

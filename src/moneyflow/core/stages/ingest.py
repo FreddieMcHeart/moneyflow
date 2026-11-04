@@ -17,15 +17,17 @@ def _entry(tx: Transaction, include: bool) -> LedgerEntry:
         status="unresolved" if include else "excluded",
         reason=None if include else "account-not-included",
         decided_by=None,
+        direction=tx.direction,
+        via=None,
     )
 
 
 def _refuse_uncategorised_white_card(inputs: Inputs) -> None:
-    """A4: a white-card leg is kept on purpose, so it must carry its category on purpose too."""
-    categorised = {r.transaction_id for r in inputs.rulings if r.kind == "category"}
+    """A4: a white-card leg is kept on purpose, so it must carry its category (or a split) on purpose too."""
+    categorised = {r.transaction_id for r in inputs.rulings if r.kind in ("category", "split")}
     for ruling in inputs.rulings:
         if ruling.kind == "white_card" and ruling.transaction_id not in categorised:
-            raise BuildRefused("white-card leg without a category ruling", ruling.transaction_id)
+            raise BuildRefused("white-card leg without a category or split ruling", ruling.transaction_id)
 
 
 def ingest(entries: list[LedgerEntry], inputs: Inputs) -> list[LedgerEntry]:
