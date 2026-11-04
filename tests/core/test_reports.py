@@ -183,7 +183,7 @@ def test_cash_in_hand_adds_withdrawals_subtracts_deposits_and_spending():
         entry("-50.00", status="excluded", reason="cash-withdrawal", day=12, tid="w"),
         entry("-20.00", status="excluded", reason="cash-deposit", day=13, tid="d1"),
         entry("10.00", status="excluded", reason="cash-deposit", day=14, direction="income", tid="d2"),
-        entry("-30.00", day=15, account_id="cash", tid="s"),
+        entry("-30.00", day=15, account_id="cash", tid="s", budget_month="2026-01"),
         entry("-999.00", day=15, tid="other"),
         entry("-500.00", status="excluded", reason="cash-withdrawal", day=9, tid="early"),
         entry("-40.00", status="excluded", reason="internal-transfer", day=16, tid="skip"),
@@ -193,16 +193,28 @@ def test_cash_in_hand_adds_withdrawals_subtracts_deposits_and_spending():
 
 def test_cash_in_hand_open_cycle_stops_at_today():
     ledger = (
-        entry("-30.00", day=14, month=1, account_id="cash", tid="in"),
-        entry("-5.00", day=20, month=1, account_id="cash", tid="late"),
+        entry("-30.00", day=14, month=1, account_id="cash", tid="in", budget_month="2026-01"),
+        entry("-5.00", day=20, month=1, account_id="cash", tid="late", budget_month="2026-01"),
     )
     open_jan = Cycle("2026-01", date(2026, 1, 1), None)
     assert cash_in_hand(open_jan, ledger, _inp(today=date(2026, 1, 15), accounts=(CARD, CASH))) == Decimal("70.00")
     assert cash_in_hand(open_jan, ledger, _inp(today=date(2026, 1, 20), accounts=(CARD, CASH))) == Decimal("65.00")
 
 
+def test_cash_in_hand_counts_kept_and_unresolved_cash_spending():
+    for status in ("kept", "unresolved"):
+        ledger = (entry("-30.00", day=15, account_id="cash", status=status, budget_month="2026-01", category=None),)
+        assert cash_in_hand(JAN, ledger, _inp(accounts=(CARD, CASH))) == Decimal("70.00"), status
+
+
+def test_cash_in_hand_ignores_excluded_and_outside_cycle_cash_spending():
+    for status in ("excluded", "outside_cycle"):
+        ledger = (entry("-30.00", day=15, account_id="cash", status=status, reason="x", budget_month=None),)
+        assert cash_in_hand(JAN, ledger, _inp(accounts=(CARD, CASH))) == Decimal("100.00"), status
+
+
 def test_month_summary_carries_cash_in_hand():
-    (jan,) = month_summaries((entry("-30.00", day=15, account_id="cash"),), (JAN,), _inp(accounts=(CARD, CASH)))
+    (jan,) = month_summaries((entry("-30.00", day=15, account_id="cash", budget_month="2026-01"),), (JAN,), _inp(accounts=(CARD, CASH)))
     assert jan.cash_in_hand == Decimal("70.00")
 
 

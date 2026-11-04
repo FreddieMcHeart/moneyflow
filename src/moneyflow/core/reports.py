@@ -111,7 +111,8 @@ def _movement(e: LedgerEntry) -> Decimal:
 
 def _cash_change(e: LedgerEntry, account: Account) -> Decimal:
     """One entry's effect on cash in hand: an excluded withdrawal or deposit, or signed spending on the cash account."""
-    spend = e.amount if e.status == "kept" and e.account_id == account.id else Decimal(0)
+    counted = e.status in ("kept", "unresolved") and e.budget_month is not None
+    spend = e.amount if counted and e.account_id == account.id else Decimal(0)
     return _movement(e) + spend
 
 
