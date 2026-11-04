@@ -8,7 +8,7 @@ from moneyflow.core.build import build
 from moneyflow.core.cycles import Cycle, build_cycles, cycle_of
 from moneyflow.core.model import BuildRefused
 from moneyflow.core.stages.ingest import ingest
-from tests.core._builders import account, attribute_ruling, inputs, reimbursement_ruling, ruling, tx
+from tests.core._builders import account, attribute_ruling, inputs, reimbursement_ruling, ruling, split_ruling, tx
 
 ACCOUNTS = (account("acc1"), account("inc", role="income"))
 
@@ -179,3 +179,48 @@ def test_attribution_decides_budget_month_not_category():
 def test_no_cycles_leaves_entries_untouched():
     ledger = build(inputs(transactions=(tx("e1"),), rulings=(ruling("c1", "e1", "food"),)))
     assert (ledger[0].status, ledger[0].budget_month) == ("kept", None)
+
+
+# Cycle-dependent refusals (split parts, manual rows, debts). Cycles: 2026-01 starts Jan 10, 2026-02 starts Feb 10 (open).
+_TWO_CYCLES = [attribute_ruling("a", "2026-01"), attribute_ruling("b", "2026-02")]
+
+
+def _split_build(parent_day, parent_month, part_date, accounts=ACCOUNTS):
+    parts = (split_ruling("p", 1, "4.00", "food", date=part_date),)
+    txs = [_salary("a", 1, 10), _salary("b", 2, 10), tx("p", amount="10.00", month=parent_month, day=parent_day)]
+    return build(_inputs(txs, [*_TWO_CYCLES, *parts], accounts))
+
+
+def test_split_part_before_cycle_start_refuses():
+    with pytest.raises(BuildRefused, match=r"part 1 dated 2026-01-05, outside the row's cycle 2026-01-10\.\.2026-02-09") as refused:
+        _split_build(20, 1, "2026-01-05")
+    assert refused.value.transaction_id == "p"
+
+
+def test_split_part_after_closed_cycle_end_refuses():
+    with pytest.raises(BuildRefused, match=r"part 1 dated 2026-02-10, outside the row's cycle 2026-01-10\.\.2026-02-09") as refused:
+        _split_build(20, 1, "2026-02-10")
+    assert refused.value.transaction_id == "p"
+
+
+def test_split_part_before_open_cycle_start_refuses():
+    with pytest.raises(BuildRefused, match=r"part 1 dated 2026-02-09, outside the row's cycle 2026-02-10\.\.open") as refused:
+        _split_build(15, 2, "2026-02-09")
+    assert refused.value.transaction_id == "p"
+
+
+def test_split_part_inside_cycle_builds():
+    got = _by_id(_split_build(20, 1, "2026-02-09"))
+    assert (got["p"].status, got["p"].budget_month) == ("kept", "2026-01")
+
+
+def test_split_part_inside_open_cycle_builds():
+    ledger = _split_build(15, 2, "2026-03-20")
+    parts = [e for e in ledger if e.transaction_id == "p" and e.status == "kept"]
+    assert {e.budget_month for e in parts} == {"2026-02"}
+
+
+def test_split_parent_outside_every_cycle_refuses():
+    with pytest.raises(BuildRefused, match=r"falls outside every cycle and cannot be split") as refused:
+        _split_build(5, 1, None)
+    assert refused.value.transaction_id == "p"

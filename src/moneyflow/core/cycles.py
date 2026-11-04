@@ -74,3 +74,12 @@ def cycle_of(cycles: tuple[Cycle, ...], day: date) -> Cycle | None:
         if day >= cycle.start and (cycle.end is None or day <= cycle.end):
             return cycle
     return None
+
+
+def describe(cycle: Cycle) -> str:
+    """`start..end`, or `start..open` for the open cycle."""
+    return f"{cycle.start}..{cycle.end if cycle.end is not None else 'open'}"
+
+
+def outside_text(entry: LedgerEntry, cycles: tuple[Cycle, ...]) -> str:
+    return f"{entry.date}, first cycle starts {cycles[0].start}"

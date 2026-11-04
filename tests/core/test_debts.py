@@ -73,3 +73,21 @@ def test_debt_repayment_down_to_exactly_zero_is_allowed():
     txs = (tx("t1", amount="50.00"), tx("t2", amount="50.00", direction="income", day=2))
     got = _build(txs, (debt_ruling("t1", "alice", "lent", id="d1"), debt_ruling("t2", "alice", "repaid", id="d2")))
     assert got[("t2", 0)].category == "Debts"
+
+
+def test_debt_outside_cycle_refuses():
+    from tests.core._builders import attribute_ruling
+
+    accounts = (account("acc1"), account("inc", role="income"))
+    salary = tx("s", account_id="inc", direction="income", amount="500.00", day=10, hour=9)
+    with pytest.raises(BuildRefused, match=r"debt on t1 is outside every budget cycle \(2026-01-02, first cycle starts 2026-01-10\)"):
+        _build((salary, tx("t1", amount="50.00", day=2)), (attribute_ruling("s", "2026-01"), debt_ruling("t1", "alice", "lent", id="d1")), accounts=accounts)
+
+
+def test_debt_inside_cycle_builds():
+    from tests.core._builders import attribute_ruling
+
+    accounts = (account("acc1"), account("inc", role="income"))
+    salary = tx("s", account_id="inc", direction="income", amount="500.00", day=10, hour=9)
+    got = _build((salary, tx("t1", amount="50.00", day=12)), (attribute_ruling("s", "2026-01"), debt_ruling("t1", "alice", "lent", id="d1")), accounts=accounts)
+    assert got[("t1", 0)].budget_month == "2026-01"
