@@ -28,9 +28,14 @@ class ParityResult:
     parts_compared: int  # base ids whose old parts were compared with the new parts
 
 
-def _signed(old: dict[str, str]) -> Decimal | None:
-    amount = Decimal(old["amount"])
-    return {"income": amount, "reimbursement": amount, "expense": -amount}.get(old["direction"])
+_SIGN = {"income": 1, "reimbursement": 1, "expense": -1}
+
+
+def _signed(old: dict[str, str], field: str = "amount") -> Decimal | None:
+    sign = _SIGN.get(old["direction"])
+    if sign is None or (field != "amount" and not old[field]):
+        return None
+    return sign * Decimal(old[field])
 
 
 def _bucket(rule: str, rule_names: set[str]) -> str | None:
@@ -221,3 +226,203 @@ def compare_excluded(
         out_of_scope=sorted(tid for tid, _ in old if tid.split("#")[0] not in raw_ids),
         not_included_mismatch=sorted(new_not_included ^ not_included_ids),
     )
+
+
+# --- cycles, UAH amounts, outside-cycle rows, totals and month summaries (0b.3) ---
+
+_KOPECK = Decimal("0.01")
+_ABSENT = "absent"
+
+
+def _kopecks(value: Decimal | None) -> Decimal | None:
+    return None if value is None else value.quantize(_KOPECK)
+
+
+def compare_cycle_fields(old_rows: list[dict[str, str]], new: Ledger) -> list[tuple[str, str]]:
+    """(id, field) for every old ledger row whose budget month or UAH amount differs from its new entry."""
+    first = {e.transaction_id: e for e in new if e.part == 0}
+    differ: list[tuple[str, str]] = []
+    for row in old_rows:
+        entry = first.get(row["id"])
+        if entry is None:
+            continue
+        if (row["budget_month"] or None) != entry.budget_month:
+            differ.append((row["id"], "budget_month"))
+        if _kopecks(_signed(row, "amount_uah")) != _kopecks(entry.amount_uah):
+            differ.append((row["id"], "amount_uah"))
+    return differ
+
+
+@dataclass(frozen=True)
+class OutsideParityResult:
+    population: int  # rows in the old outside_cycles file
+    compared: int  # of those, rows the new ledger also holds as outside_cycle
+    differ: list[tuple[str, str]]  # (id, field); field is "absent", "status", "extra" or a value field
+
+
+def _outside_diffs(old: dict[str, str], entry: LedgerEntry) -> list[str]:
+    checks = {
+        "category": (old["category"] or None) == entry.category,
+        "subcategory": (old["subcategory"] or None) == entry.subcategory,
+        "amount": _signed(old) == entry.amount,
+    }
+    return [field for field, ok in checks.items() if not ok]
+
+
+def compare_outside(old_outside: list[dict[str, str]], new: Ledger) -> OutsideParityResult:
+    first = {e.transaction_id: e for e in new if e.part == 0}
+    differ: list[tuple[str, str]] = []
+    compared = 0
+    for row in old_outside:
+        entry = first.get(row["id"])
+        if entry is None:
+            differ.append((row["id"], _ABSENT))
+        elif entry.status != "outside_cycle":
+            differ.append((row["id"], "status"))
+        else:
+            compared += 1
+            differ += [(row["id"], field) for field in _outside_diffs(row, entry)]
+    old_ids = {row["id"] for row in old_outside}
+    extra = sorted(tid for tid, e in first.items() if e.status == "outside_cycle" and tid not in old_ids)
+    return OutsideParityResult(len(old_outside), compared, differ + [(tid, "extra") for tid in extra])
+
+
+Totals = dict[tuple[str, str | None, str | None, str], tuple[Decimal | None, Decimal | None]]
+
+
+def _add(total: Decimal | None, value: Decimal | None) -> Decimal | None:
+    return None if total is None or value is None else total + value
+
+
+def _accumulate(totals: Totals, key: tuple, amount: Decimal | None, uah: Decimal | None) -> None:
+    have_amount, have_uah = totals.get(key, (Decimal(0), Decimal(0)))
+    totals[key] = (_add(have_amount, amount), _add(have_uah, uah))
+
+
+def _old_totals(old_rows: list[dict[str, str]]) -> Totals:
+    totals: Totals = {}
+    for row in old_rows:
+        if row["budget_month"] and row["category"]:
+            key = (row["budget_month"], row["category"], row["subcategory"] or None, row["currency"])
+            _accumulate(totals, key, _signed(row), _signed(row, "amount_uah"))
+    return totals
+
+
+def _new_totals(new: Ledger) -> Totals:
+    totals: Totals = {}
+    for e in new:
+        if e.status == "kept":
+            _accumulate(totals, (e.budget_month, e.category, e.subcategory, e.currency), e.amount, e.amount_uah)
+    return totals
+
+
+def _cell(totals: Totals, key: tuple, index: int) -> Decimal | str | None:
+    if key not in totals:
+        return _ABSENT
+    return _kopecks(totals[key][index])
+
+
+def _differs(old: Decimal | str | None, new: Decimal | str | None) -> bool:
+    return old is None or new is None or old != new  # an unconverted (None) total never matches
+
+
+def compare_totals(old_rows: list[dict[str, str]], new: Ledger) -> list[tuple[tuple, str]]:
+    """((budget_month, category, subcategory, currency), field) for every kept-row total that differs."""
+    old, fresh = _old_totals(old_rows), _new_totals(new)
+    return [
+        (key, field)
+        for key in sorted(old.keys() | fresh.keys(), key=str)
+        for index, field in enumerate(("amount", "amount_uah"))
+        if _differs(_cell(old, key, index), _cell(fresh, key, index))
+    ]
+
+
+def _total_actual(new_value):
+    return {currency: -amount for currency, amount in new_value.items()}  # old counts spending positive
+
+
+_SUMMARY_FIELDS = (
+    "income", "total_actual", "cycle_start", "cycle_end", "cycle_open", "days_total", "days_left", "cash_in_hand",
+)
+
+
+def _summary_value(summary, field: str, *, new: bool):
+    value = getattr(summary, field)
+    return _total_actual(value) if new and field == "total_actual" else value
+
+
+def compare_summaries(old: list, new: list) -> list[tuple[str, str]]:
+    """(budget_month, field) for every month summary field that differs; a month on one side only is "absent"."""
+    old_by = {s.budget_month: s for s in old}
+    new_by = {s.budget_month: s for s in new}
+    differ: list[tuple[str, str]] = []
+    for month in sorted(old_by.keys() | new_by.keys()):
+        if month not in old_by or month not in new_by:
+            differ.append((month, _ABSENT))
+            continue
+        differ += [
+            (month, field)
+            for field in _SUMMARY_FIELDS
+            if _summary_value(old_by[month], field, new=False) != _summary_value(new_by[month], field, new=True)
+        ]
+    return differ
+
+
+@dataclass(frozen=True)
+class CycleLine:
+    budget_month: str | None  # None: differences that belong to no known cycle
+    open: bool
+    rows: int
+    totals: int
+    summary: int
+
+    def text(self) -> str:
+        month = self.budget_month or "(no cycle)"
+        return f"{month} rows differ {self.rows}, totals differ {self.totals}, summary differ {self.summary}"
+
+    def clean(self) -> bool:
+        return self.open or not (self.rows or self.totals or self.summary)
+
+
+def _count(pairs, month_of) -> dict[str | None, int]:
+    counts: dict[str | None, int] = {}
+    for pair in pairs:
+        month = month_of(pair)
+        counts[month] = counts.get(month, 0) + 1
+    return counts
+
+
+def cycle_lines(
+    old_summaries: list,
+    old_rows: list[dict[str, str]],
+    row_differ: list[tuple[str, str]],
+    totals_differ: list[tuple[tuple, str]],
+    summary_differ: list[tuple[str, str]],
+) -> list[CycleLine]:
+    """One line per old cycle, in cycle order, plus a "(no cycle)" line when a difference has no cycle."""
+    month_by_id = {row["id"].split("#")[0]: row["budget_month"] or None for row in old_rows}
+    rows = _count(row_differ, lambda pair: month_by_id.get(pair[0].split("#")[0]))
+    totals = _count(totals_differ, lambda pair: pair[0][0])
+    summary = _count(summary_differ, lambda pair: pair[0])
+    months = {s.budget_month for s in old_summaries}
+    lines = [
+        CycleLine(s.budget_month, s.cycle_open, rows.get(s.budget_month, 0), totals.get(s.budget_month, 0),
+                  summary.get(s.budget_month, 0))
+        for s in old_summaries
+    ]
+    stray = [m for m in {*rows, *totals, *summary} if m not in months]
+    if stray:
+        count = lambda by: sum(by.get(m, 0) for m in stray)  # noqa: E731
+        lines.append(CycleLine(None, False, count(rows), count(totals), count(summary)))
+    return lines
+
+
+@dataclass(frozen=True)
+class CycleParity:
+    outside: OutsideParityResult
+    lines: list[CycleLine]
+
+
+def cycles_clean(lines: list[CycleLine], outside: OutsideParityResult) -> bool:
+    """Every closed cycle clean and the outside-cycle rows matching; the open cycle is reported, not gated."""
+    return bool(lines) and not outside.differ and all(line.clean() for line in lines)

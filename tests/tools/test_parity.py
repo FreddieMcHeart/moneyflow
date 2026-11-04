@@ -364,10 +364,219 @@ def test_excluded_out_of_scope_counted():
     assert r.out_of_scope == ["gone", "gone2#1"] and r.population == 1
 
 
-def test_main_prints_rows_outside_budget_cycles_and_keeps_the_exit_code(monkeypatch, tmp_path, capsys):
+# --- 0b.3 cycles, UAH amounts, outside-cycle rows, totals, month summaries (Task 9) ---
+
+from tools.parity import compare as cmp_mod  # noqa: E402
+
+
+def _oc(tid, month="2026-01", uah="500.00", **kw):
+    return {**_old(tid, **kw), "budget_month": month, "amount_uah": uah}
+
+
+def _nc(tid, month="2026-01", uah="-500.00", status="kept", **kw):
+    return replace(_newe(tid, **kw), budget_month=month, amount_uah=None if uah is None else Decimal(uah), status=status)
+
+
+def test_budget_month_mismatch_reported():
+    assert cmp_mod.compare_cycle_fields([_oc("a")], (_nc("a"),)) == []
+    assert cmp_mod.compare_cycle_fields([_oc("a")], (_nc("a", month="2026-02"),)) == [("a", "budget_month")]
+    assert cmp_mod.compare_cycle_fields([_oc("a")], (_nc("a", month=None),)) == [("a", "budget_month")]
+    assert cmp_mod.compare_cycle_fields([_oc("a", month="")], (_nc("a", month=None),)) == []
+
+
+def test_amount_uah_mismatch_reported():
+    assert cmp_mod.compare_cycle_fields([_oc("a")], (_nc("a", uah="-500.0"),)) == []
+    assert cmp_mod.compare_cycle_fields([_oc("a")], (_nc("a", uah="-500.01"),)) == [("a", "amount_uah")]
+    assert cmp_mod.compare_cycle_fields([_oc("a")], (_nc("a", uah=None),)) == [("a", "amount_uah")]
+    income = _oc("i", uah="70.00", direction="income")
+    assert cmp_mod.compare_cycle_fields([income], (_nc("i", uah="70.00", direction="income", amount="70.00"),)) == []
+    assert cmp_mod.compare_cycle_fields([income], (_nc("i", uah="-70.00", direction="income", amount="70.00"),)) == [("i", "amount_uah")]
+
+
+def test_cycle_fields_skip_parts_and_unmatched_ids():
+    assert cmp_mod.compare_cycle_fields([_oc("p#1", month="2026-09")], (_nc("p"),)) == []
+    assert cmp_mod.compare_cycle_fields([_oc("gone")], ()) == []
+
+
+def _out_old(tid, category="", sub="", amount="500.00"):
+    return _old(tid, category, sub, "unmatched", amount=amount)
+
+
+def _out_new(tid, category=None, sub=None, amount="-500.00", status="outside_cycle"):
+    return _nc(tid, month=None, uah=None, status=status, category=category, sub=sub, amount=amount)
+
+
+def test_outside_cycle_rows_compared():
+    ok = cmp_mod.compare_outside([_out_old("a"), _out_old("b", "Food", "x", "7.00")],
+                                 (_out_new("a"), _out_new("b", "Food", "x", "-7.00")))
+    assert (ok.population, ok.compared, ok.differ) == (2, 2, [])
+    cases = [
+        (_out_new("a", category="Food"), "category"),
+        (_out_new("a", sub="x"), "subcategory"),
+        (_out_new("a", amount="-501.00"), "amount"),
+    ]
+    for new, field in cases:
+        assert cmp_mod.compare_outside([_out_old("a")], (new,)).differ == [("a", field)]
+    assert cmp_mod.compare_outside([_out_old("a")], ()).differ == [("a", "absent")]
+    extra = cmp_mod.compare_outside([_out_old("a")], (_out_new("a"), _out_new("z")))
+    assert extra.differ == [("z", "extra")]
+
+
+def test_outside_cycle_vs_unresolved_reported():
+    unresolved = _out_new("a", status="unresolved")
+    assert cmp_mod.compare_outside([_out_old("a")], (unresolved,)).differ == [("a", "status")]
+    kept = _out_new("a", status="kept")
+    assert cmp_mod.compare_outside([_out_old("a")], (kept,)).differ == [("a", "status")]
+    assert cmp_mod.compare_outside([_out_old("a")], (_out_new("a"),)).differ == []
+
+
+def _totals_old():
+    return [_oc("a", category="Food", sub="x", amount="10.00", uah="10.00"),
+            _oc("b", category="Food", sub="x", amount="5.00", uah="5.00"),
+            _oc("c", category="Pay", direction="income", amount="100.00", uah="100.00"),
+            _oc("u", category="", amount="9.00", uah="9.00"),
+            _oc("p#1", category="Food", sub="x", amount="1.00", uah="1.00")]
+
+
+def _totals_new():
+    return (_nc("a", category="Food", sub="x", amount="-10.00", uah="-10.00"),
+            _nc("b", category="Food", sub="x", amount="-5.00", uah="-5.00"),
+            _nc("c", category="Pay", amount="100.00", uah="100.00", direction="income"),
+            _nc("u", category=None, amount="-9.00", uah="-9.00", status="unresolved"),
+            _nc("p", part=1, category="Food", sub="x", amount="-1.00", uah="-1.00"),
+            _nc("p", part=0, category=None, amount="-1.00", uah=None, status="excluded"))
+
+
+def test_totals_per_cycle_category_currency():
+    assert cmp_mod.compare_totals(_totals_old(), _totals_new()) == []
+    new = list(_totals_new())
+    mutations = {
+        "month": replace(new[0], budget_month="2026-02"),
+        "category": replace(new[0], category="Fun"),
+        "subcategory": replace(new[0], subcategory="y"),
+        "currency": replace(new[0], currency="USD"),
+        "amount": replace(new[0], amount=Decimal("-10.01")),
+    }
+    for name, entry in mutations.items():
+        assert cmp_mod.compare_totals(_totals_old(), (entry, *new[1:])) != [], name
+    key = ("2026-01", "Food", "x", "UAH")
+    assert cmp_mod.compare_totals(_totals_old(), (replace(new[0], amount=Decimal("-10.01")), *new[1:])) == [
+        (key, "amount")]
+    extra = _nc("z", category="Fun", amount="-1.00", uah="-1.00")
+    assert cmp_mod.compare_totals(_totals_old(), (*new, extra)) == [(("2026-01", "Fun", None, "UAH"), "amount"),
+                                                                    (("2026-01", "Fun", None, "UAH"), "amount_uah")]
+
+
+def test_totals_uah_mismatch_reported():
+    new = list(_totals_new())
+    key = ("2026-01", "Food", "x", "UAH")
+    off = replace(new[0], amount_uah=Decimal("-10.01"))
+    assert cmp_mod.compare_totals(_totals_old(), (off, *new[1:])) == [(key, "amount_uah")]
+    unconverted = replace(new[0], amount_uah=None)
+    assert cmp_mod.compare_totals(_totals_old(), (unconverted, *new[1:])) == [(key, "amount_uah")]
+
+
+def _summary(month="2026-01", **kw):
+    base = dict(budget_month=month, cycle_start=date(2026, 1, 1), cycle_end=date(2026, 1, 31), cycle_open=False,
+                days_total=31, days_left=0, income={"UAH": Decimal("100.00")}, total_actual={"UAH": Decimal("40.00")},
+                cash_in_hand=None)
+    return NS(**{**base, **kw})
+
+
+def _summary_new(**kw):
+    kw = {"total_actual": {"UAH": Decimal("-40.00")}, **kw}
+    return _summary(**kw)
+
+
+def test_month_summaries_compared_field_by_field():
+    assert cmp_mod.compare_summaries([_summary()], [_summary_new()]) == []
+    mutations = {
+        "income": {"income": {"UAH": Decimal("101.00")}},
+        "total_actual": {"total_actual": {"UAH": Decimal("-41.00")}},
+        "cycle_start": {"cycle_start": date(2026, 1, 2)},
+        "cycle_end": {"cycle_end": date(2026, 1, 30)},
+        "cycle_open": {"cycle_open": True},
+        "days_total": {"days_total": 30},
+        "days_left": {"days_left": 1},
+        "cash_in_hand": {"cash_in_hand": Decimal("0")},
+    }
+    for field, change in mutations.items():
+        assert cmp_mod.compare_summaries([_summary()], [_summary_new(**change)]) == [("2026-01", field)], field
+    assert cmp_mod.compare_summaries([_summary()], []) == [("2026-01", "absent")]
+    assert cmp_mod.compare_summaries([], [_summary_new()]) == [("2026-01", "absent")]
+    # old total_actual counts spending positive, the new ledger signs it negative: equal magnitude must match
+    assert cmp_mod.compare_summaries([_summary(total_actual={"UAH": Decimal("40.00")})],
+                                     [_summary_new(total_actual={"UAH": Decimal("40.00")})]) == [("2026-01", "total_actual")]
+
+
+def test_per_cycle_report_line():
+    old = [_summary("2026-01"), _summary("2026-02", cycle_open=True, cycle_end=None)]
+    lines = cmp_mod.cycle_lines(
+        old,
+        [_oc("a"), _oc("b", month="2026-02")],
+        [("a", "category"), ("b", "amount")],
+        [(("2026-02", "Food", None, "UAH"), "amount")],
+        [("2026-01", "income"), ("2026-01", "days_left")],
+    )
+    assert [line.text() for line in lines] == [
+        "2026-01 rows differ 1, totals differ 0, summary differ 2",
+        "2026-02 rows differ 1, totals differ 1, summary differ 0",
+    ]
+    assert [line.open for line in lines] == [False, True]
+
+
+def test_open_cycle_is_reported_not_gated():
+    old = [_summary("2026-01"), _summary("2026-02", cycle_open=True, cycle_end=None)]
+    outside = cmp_mod.OutsideParityResult(population=1, compared=1, differ=[])
+    open_only = cmp_mod.cycle_lines(old, [_oc("b", month="2026-02")], [("b", "amount")], [], [])
+    assert cmp_mod.cycles_clean(open_only, outside) is True
+    closed = cmp_mod.cycle_lines(old, [_oc("a")], [("a", "amount")], [], [])
+    assert cmp_mod.cycles_clean(closed, outside) is False
+    assert cmp_mod.cycles_clean(open_only, replace(outside, differ=[("a", "status")])) is False
+    assert cmp_mod.cycles_clean([], outside) is False  # no cycles at all is not a pass
+
+
+def test_row_with_unknown_month_is_gated():
+    old = [_summary("2026-01")]
+    lines = cmp_mod.cycle_lines(old, [], [("ghost", "category")], [], [])
+    outside = cmp_mod.OutsideParityResult(population=0, compared=0, differ=[])
+    assert cmp_mod.cycles_clean(lines, outside) is False
+    assert lines[-1].text() == "(no cycle) rows differ 1, totals differ 0, summary differ 0"
+
+
+def test_old_summaries_wiring(tmp_path):
+    seen = {}
+    rows = [NS(account="manual-cash-uah"), NS(account="acc1")]
+    old = NS(
+        ledger=NS(load_ledger_dir=lambda path: seen.setdefault("ledger", path) and rows),
+        accounts=NS(load_accounts=lambda path: {"x": NS(id="inc", role="income"), "y": NS(id="s", role="spending")}),
+        cycles=NS(
+            load_attribution=lambda path: {"t": "2026-01"},
+            build_cycles=lambda r, attribution, income: seen.update(cycle_args=(r, attribution, income)) or ["cycle"],
+        ),
+        cash=NS(
+            CASH_ACCOUNT="manual-cash-uah", CASH_OPENING=Decimal("1"), CASH_CUTOVER=date(2026, 11, 1),
+            load_cash_movements=lambda path: ["movement"],
+            cash_balance=lambda *a: seen.update(cash_args=a) or {"2026-01": None},
+        ),
+        model=NS(month_summaries=lambda r, c, today, cash_in_hand: seen.update(final=(r, c, today, cash_in_hand)) or ["s"]),
+    )
+    today = date(2026, 11, 4)
+    assert parity_main._old_summaries(tmp_path, old, today) == ["s"]
+    assert seen["cycle_args"] == (rows, {"t": "2026-01"}, {"inc"})
+    assert seen["cash_args"] == (["movement"], [rows[0]], ["cycle"], Decimal("1"), date(2026, 11, 1), today)
+    assert seen["final"] == (rows, ["cycle"], today, {"2026-01": None})
+
+
+def test_old_modules_load_from_the_old_repo_path(tmp_path):
+    with pytest.raises(ModuleNotFoundError):
+        parity_main._load_old_modules(tmp_path / "no-such-repo")
+
+
+def _stub_main(monkeypatch, tmp_path, cycle_pass):
     data = tmp_path / "data"
-    data.mkdir()
-    (data / "outside_cycles.csv").write_text("id,amount\nx1,1.00\nx2,2.00\n", encoding="utf-8")
+    data.mkdir(exist_ok=True)
+    (data / "excluded.csv").write_text("id,rule\n", encoding="utf-8")
     monkeypatch.setattr(parity_main.db, "connect", lambda url: nullcontext(None))
     monkeypatch.setattr(parity_main.db, "load_ledger", lambda conn: ())
     monkeypatch.setattr(parity_main.db, "load_inputs", lambda conn, *, today: NS(accounts=(), transactions=()))
@@ -375,8 +584,65 @@ def test_main_prints_rows_outside_budget_cycles_and_keeps_the_exit_code(monkeypa
         monkeypatch.setattr(parity_main, name, lambda *a: [])
     monkeypatch.setattr(parity_main, "compare", lambda *a: _result())
     monkeypatch.setattr(parity_main, "compare_excluded", lambda *a: _clean_excluded())
-    (data / "excluded.csv").write_text("id,rule\n", encoding="utf-8")
+    monkeypatch.setattr(parity_main, "_cycle_passes", cycle_pass)
+
+
+def _cycle_parity(differ=(), month_differ=0):
+    outside = cmp_mod.OutsideParityResult(population=2, compared=2, differ=list(differ))
+    lines = cmp_mod.cycle_lines([_summary("2026-01")], [_oc("a")], [("a", "x")] * month_differ, [], [])
+    return cmp_mod.CycleParity(outside=outside, lines=lines)
+
+
+def test_main_prints_the_cycle_passes_and_keeps_the_exit_code(monkeypatch, tmp_path, capsys):
+    _stub_main(monkeypatch, tmp_path, lambda *a: _cycle_parity())
     with pytest.raises(SystemExit) as stop:
         parity_main.main(["--old-repo", str(tmp_path), "--db", "unused"])
+    out = capsys.readouterr().out
     assert stop.value.code == 0
-    assert "old rows outside budget cycles: 2 (not value-compared)" in capsys.readouterr().out
+    assert "outside cycle population: 2" in out
+    assert "outside cycle differ: 0" in out
+    assert "2026-01 rows differ 0, totals differ 0, summary differ 0" in out
+
+
+@pytest.mark.parametrize("kind", ["outside", "closed cycle"])
+def test_main_exits_one_when_a_cycle_pass_differs(monkeypatch, tmp_path, kind):
+    parity = _cycle_parity(differ=[("a", "status")]) if kind == "outside" else _cycle_parity(month_differ=1)
+    _stub_main(monkeypatch, tmp_path, lambda *a: parity)
+    with pytest.raises(SystemExit) as stop:
+        parity_main.main(["--old-repo", str(tmp_path), "--db", "unused"])
+    assert stop.value.code == 1
+
+
+def test_main_hands_the_cycle_passes_the_ledger_rows_and_the_row_differ(monkeypatch, tmp_path):
+    seen = {}
+
+    def spy(old_repo, data, old_rows, new, inputs, differ):
+        seen.update(repo=old_repo, data=data, rows=old_rows, differ=differ)
+        return _cycle_parity()
+
+    _stub_main(monkeypatch, tmp_path, spy)
+    monkeypatch.setattr(parity_main, "_old_ledger", lambda *a: ["row"])
+    monkeypatch.setattr(parity_main, "compare", lambda *a: _result(differ=[("a", "category")]))
+    with pytest.raises(SystemExit):
+        parity_main.main(["--old-repo", str(tmp_path), "--db", "unused"])
+    assert seen == {"repo": tmp_path, "data": tmp_path / "data", "rows": ["row"], "differ": [("a", "category")]}
+
+
+def test_totals_keep_the_old_currency_apart():
+    usd_old = [_oc("a", category="Food", currency="USD", amount="10.00", uah="440.00")]
+    usd_new = (replace(_nc("a", category="Food", amount="-10.00", uah="-440.00"), currency="USD"),)
+    assert cmp_mod.compare_totals(usd_old, usd_new) == []
+    uah_new = (replace(usd_new[0], currency="UAH"),)
+    key_old, key_new = ("2026-01", "Food", None, "USD"), ("2026-01", "Food", None, "UAH")
+    assert [k for k, _ in cmp_mod.compare_totals(usd_old, uah_new)] == [key_new, key_new, key_old, key_old]
+
+
+def test_unconverted_totals_never_match_each_other():
+    blank = [_oc("a", category="Food", uah="")]
+    unconverted = (_nc("a", category="Food", uah=None),)
+    assert cmp_mod.compare_totals(blank, unconverted) == [(("2026-01", "Food", None, "UAH"), "amount_uah")]
+
+
+def test_uah_compared_to_the_kopeck_not_beyond():
+    assert cmp_mod.compare_cycle_fields([_oc("a")], (_nc("a", uah="-500.004"),)) == []
+    assert cmp_mod.compare_cycle_fields([_oc("a")], (_nc("a", uah="-500.006"),)) == [("a", "amount_uah")]
