@@ -97,6 +97,8 @@ def main(argv: list[str] | None = None) -> None:
     excluded = compare_excluded(_read_csv(data / "excluded.csv"), raw, new, _not_included_ids(inputs))
     report(result)
     report_excluded(excluded)
+    # Old rows outside budget cycles are not in data/ledger, so neither pass compares them.
+    print(f"old rows outside budget cycles: {len(_read_csv(data / 'outside_cycles.csv'))} (not value-compared)")
     raise SystemExit(exit_code(result, excluded))
 
 

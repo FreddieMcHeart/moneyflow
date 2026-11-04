@@ -362,3 +362,21 @@ def test_split_parent_in_scope_by_base_id():
 def test_excluded_out_of_scope_counted():
     r = _cx([_oex("a"), _oex("gone"), _oex("gone2#1", "split")], [_nex("a")], {"a"})
     assert r.out_of_scope == ["gone", "gone2#1"] and r.population == 1
+
+
+def test_main_prints_rows_outside_budget_cycles_and_keeps_the_exit_code(monkeypatch, tmp_path, capsys):
+    data = tmp_path / "data"
+    data.mkdir()
+    (data / "outside_cycles.csv").write_text("id,amount\nx1,1.00\nx2,2.00\n", encoding="utf-8")
+    monkeypatch.setattr(parity_main.db, "connect", lambda url: nullcontext(None))
+    monkeypatch.setattr(parity_main.db, "load_ledger", lambda conn: ())
+    monkeypatch.setattr(parity_main.db, "load_inputs", lambda conn: NS(accounts=(), transactions=()))
+    for name in ("_raw_ids", "_old_ledger", "_rule_names"):
+        monkeypatch.setattr(parity_main, name, lambda *a: [])
+    monkeypatch.setattr(parity_main, "compare", lambda *a: _result())
+    monkeypatch.setattr(parity_main, "compare_excluded", lambda *a: _clean_excluded())
+    (data / "excluded.csv").write_text("id,rule\n", encoding="utf-8")
+    with pytest.raises(SystemExit) as stop:
+        parity_main.main(["--old-repo", str(tmp_path), "--db", "unused"])
+    assert stop.value.code == 0
+    assert "old rows outside budget cycles: 2 (not value-compared)" in capsys.readouterr().out
