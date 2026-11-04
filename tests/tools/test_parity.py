@@ -59,20 +59,20 @@ def test_expense_sign():
 
 def test_currency_and_unknown_direction():
     assert _run([_old("a", currency="USD")], [_new("a")]).differ == [("a", "currency")]
-    assert _run([_old("a", direction="reimbursement")], [_new("a")]).differ == [("a", "direction")]
+    assert _run([_old("a", direction="bogus")], [_new("a")]).differ == [("a", "direction")]
 
 
 def test_rows_decided_by_other_mechanisms_not_in_population():
-    old = [_old("a", rule=r) for r in ("debt:manual", "split:x", "refund:m", "investment-withdrawal", "")]
+    old = [_old("a", rule=r) for r in ("split:x", "refund", "investment-withdrawal", "")]
     result = _run(old, [], raw=set())
     assert (result.population, result.compared, result.out_of_scope) == (0, 0, [])
 
 
 def test_missing_vs_out_of_scope():
-    old = [_old("a"), _old("b"), _old("m#rest", rule="override:manual")]
+    old = [_old("a"), _old("b"), _old("m-gone", rule="override:manual")]
     new = [_new("a", part=1), _new("c")]
     result = compare(old, {"r1"}, {"a", "b", "c"}, tuple(new))
-    assert result.out_of_scope == ["m#rest"]
+    assert result.out_of_scope == ["m-gone"]
     assert result.missing == ["a", "b"]
     assert (result.population, result.compared) == (3, 2)
 
@@ -89,7 +89,7 @@ def test_rule_name_must_match_decided_by():
 
 
 def _result(**kw):
-    base = dict(population=2, compared=2, differ=[], missing=[], out_of_scope=[])
+    base = dict(population=2, compared=2, differ=[], missing=[], out_of_scope=[], parts_compared=0)
     return ParityResult(**{**base, **kw})
 
 
@@ -102,7 +102,6 @@ def _clean_excluded():
         {"a"},
         (LedgerEntry("a", 0, date(2026, 1, 5), "acc1", None, None, Decimal("-1.00"), "UAH",
                      "excluded", "internal-transfer", "core:internal-transfer", "expense", None),),
-        set(),
         set(),
     )
 
@@ -132,8 +131,8 @@ def _nex(tid, reason="internal-transfer", status="excluded"):
     )
 
 
-def _cx(old, new, raw, not_included=(), pending=()):
-    return compare_excluded(old, set(raw), tuple(new), set(not_included), set(pending))
+def _cx(old, new, raw, not_included=()):
+    return compare_excluded(old, set(raw), tuple(new), set(not_included))
 
 
 def test_excluded_same_reason_passes():
@@ -158,30 +157,8 @@ def test_old_kept_new_excluded_fails():
 
 
 def test_old_kept_is_raw_minus_old_excluded():
-    r = _cx([_oex("a"), _oex("x#1", "split")], [_nex("a")], {"a", "k1", "k2", "x"})
-    assert r.old_kept == 3  # k1, k2, x: raw minus the old excluded ids {a, x#1}
-
-
-def test_next_slice_reasons_reported_and_asserted_not_excluded():
-    old = [_oex("s1#1", "split"), _oex("s2#1", "split"), _oex("c1#rest", "credit-principal"), _oex("a")]
-    r = _cx(old, [_nex("a")], {"a", "s1", "s2", "c1"})
-    assert r.next_slice == {"split": 2, "credit-principal": 1}
-    assert r.next_slice_excluded == [] and r.population == 1 and r.derived == 3
-
-
-def test_split_id_excluded_in_new_fails():
-    r = _cx([_oex("s1#1", "split")], [_nex("s1")], {"s1"})
-    assert r.next_slice_excluded == [("s1", "split", "internal-transfer")]
-
-
-def test_credit_principal_base_id_excluded_in_new_fails():
-    r = _cx([_oex("c1#rest", "credit-principal")], [_nex("c1", "credit-drawdown")], {"c1"})
-    assert r.next_slice_excluded == [("c1", "credit-principal", "credit-drawdown")]
-
-
-def test_split_pending_bucket_counted_and_not_excluded():
-    r = _cx([_oex("a")], [_nex("a"), _nex("w1")], {"a", "w1", "w2"}, pending={"w1", "w2"})
-    assert r.split_pending == 2 and r.split_pending_excluded == ["w1"]
+    r = _cx([_oex("a"), _oex("x#1", "split")], [_nex("a"), _nex("x", "split")], {"a", "k1", "k2", "x"})
+    assert r.old_kept == 2  # k1, k2: raw minus the base ids of the old excluded rows {a, x}
 
 
 def test_account_not_included_allowlisted_by_id():
@@ -214,8 +191,6 @@ def test_exit_code_requires_excluded():
     "flag, value",
     [
         ("old_kept_excluded", [("k", "cashback-roundup")]),
-        ("next_slice_excluded", [("s1", "split", "internal-transfer")]),
-        ("split_pending_excluded", ["w1"]),
         ("not_included_mismatch", ["n1"]),
     ],
 )
@@ -234,8 +209,8 @@ class _Stop(Exception):
 def test_main_hands_compare_excluded_the_real_allowlists(monkeypatch, tmp_path):
     inputs = NS(
         accounts=(NS(id="on", include=True), NS(id="off", include=False)),
-        transactions=(NS(id="t-on", account_id="on"), NS(id="t-off", account_id="off")),
-        rulings=(NS(id="split_pending:p", transaction_id="t-pend"), NS(id="exclude:x", transaction_id="t-on")),
+        transactions=(NS(id="t-on", account_id="on", source="bank"), NS(id="t-off", account_id="off", source="bank"),
+                      NS(id="manual-1", account_id="on", source="manual")),
     )
     monkeypatch.setattr(parity_main.db, "connect", lambda url: nullcontext(None))
     monkeypatch.setattr(parity_main.db, "load_ledger", lambda conn: ())
@@ -244,11 +219,127 @@ def test_main_hands_compare_excluded_the_real_allowlists(monkeypatch, tmp_path):
         monkeypatch.setattr(parity_main, name, lambda *a: [])
     seen = {}
 
-    def fake_compare_excluded(old, raw, new, not_included, pending):
-        seen.update(not_included=not_included, pending=pending)
+    def fake_compare_excluded(old, raw, new, not_included):
+        seen.update(not_included=not_included, raw=raw)
         raise _Stop
 
     monkeypatch.setattr(parity_main, "compare_excluded", fake_compare_excluded)
     with pytest.raises(_Stop):
         parity_main.main(["--old-repo", str(tmp_path), "--db", "unused"])
-    assert seen == {"not_included": {"t-off"}, "pending": {"t-pend"}}
+    assert seen == {"not_included": {"t-off"}, "raw": {"manual-1"}}
+
+
+# --- 0b.2 buckets (Task 11) ---
+
+
+def _newe(tid, part=0, category="Cafe", sub=None, decided_by="rule:r1", amount="-500.00", via=None, direction="expense",
+          status="kept", reason=None):
+    return LedgerEntry(
+        tid, part, date(2026, 1, 5), "acc1", category, sub, Decimal(amount), "UAH",
+        status, reason, decided_by, direction, via,
+    )
+
+
+def _split_old(base, n, amount, category="Cafe", sub="", rule="split"):
+    return _old(f"{base}#{n}", category, sub, rule, amount=amount)
+
+
+def _split_new(base, part, amount, category="Cafe", sub=None, decided_by=None):
+    return _newe(base, part, category, sub, decided_by or f"ruling:split:{base}:{part}", f"-{amount}",
+                 via=f"ruling:split:{base}:{part}")
+
+
+def test_split_parts_compared_as_multiset():
+    old = [_split_old("p", 1, "10.00", "Food"), _split_old("p", 2, "20.00", "Cafe"),
+           _split_old("p", "rest", "70.00", "Misc", rule="split-remainder")]
+    new = [_newe("p", 0, None, None, "core:split", "-100.00", status="excluded", reason="split"),
+           _split_new("p", 2, "20.00", "Cafe"), _split_new("p", 1, "10.00", "Food"),
+           _newe("p", 3, "Misc", None, "rule:r2", "-70.00")]
+    result = compare(old, {"r1"}, {"p"}, tuple(new))
+    assert result.differ == [] and result.parts_compared == 1 and result.out_of_scope == []
+
+
+def test_split_part_amount_mismatch_reported():
+    old = [_split_old("p", 1, "10.00"), _split_old("p", 2, "90.00", rule="split-remainder")]
+    new = [_newe("p", 0, None, None, "core:split", "-100.00", status="excluded", reason="split"),
+           _split_new("p", 1, "11.00"), _newe("p", 2, "Cafe", None, "rule:r2", "-89.00")]
+    assert compare(old, {"r1"}, {"p"}, tuple(new)).differ == [("p", "parts")]
+
+
+def test_split_part_deciding_mechanism_checked():
+    old = [_split_old("p", 1, "10.00")]
+    new = [_newe("p", 0, None, None, "core:split", "-10.00", status="excluded", reason="split"),
+           _newe("p", 1, "Cafe", None, "rule:r1", "-10.00")]
+    assert compare(old, {"r1"}, {"p"}, tuple(new)).differ == [("p", "parts")]
+
+
+def test_credit_interest_part_compared():
+    old = [_old("c#interest", "Credit", "", "credit-interest", amount="5.00")]
+    ok = _newe("c", 1, "Credit", None, "core:credit-interest", "-5.00", via="rule:cr")
+    assert compare(old, set(), {"c"}, (ok,)).differ == []
+    bad = _newe("c", 1, "Credit", None, "core:credit-interest", "-6.00", via="rule:cr")
+    assert compare(old, set(), {"c"}, (bad,)).differ == [("c", "parts")]
+
+
+def test_part_added_in_new_only_is_reported():
+    extra = _split_new("p", 1, "10.00")
+    assert compare([], set(), {"p"}, (extra,)).differ == [("p", "parts")]
+
+
+def test_refund_bucket_compared_via_shadow_rule():
+    old = [_old("a", "Fuel", "", "refund:wog", amount="100.00", direction="reimbursement")]
+    ok = _newe("a", 0, "Fuel", None, "rule:wog", "100.00", via="rule:import-cancellation", direction="reimbursement")
+    assert compare(old, {"wog"}, {"a"}, (ok,)).differ == []
+    wrong = replace(ok, decided_by="rule:other")
+    assert compare(old, {"wog"}, {"a"}, (wrong,)).differ == [("a", "decided_by")]
+    no_via = replace(ok, via=None)
+    assert compare(old, {"wog"}, {"a"}, (no_via,)).differ == [("a", "decided_by")]
+
+
+def test_investment_withdrawal_and_person_return_buckets():
+    inv = _old("i", "Savings", "", "investment-withdrawal:atm", amount="50.00", direction="reimbursement")
+    ret = _old("r", "Family", "", "alice-return", amount="30.00", direction="reimbursement")
+    new = (
+        _newe("i", 0, "Savings", None, "rule:atm", "50.00", via="rule:import-investment-withdrawal", direction="reimbursement"),
+        _newe("r", 0, "Family", None, "rule:alice-return", "30.00", via="rule:alice-return", direction="reimbursement"),
+    )
+    assert compare([inv, ret], {"atm"}, {"i", "r"}, new).differ == []
+    swapped = (replace(new[0], decided_by="rule:zzz"), replace(new[1], via=None))
+    assert sorted(compare([inv, ret], {"atm"}, {"i", "r"}, swapped).differ) == [("i", "decided_by"), ("r", "decided_by")]
+
+
+def test_ruling_buckets_checked_through_via():
+    old = [_old("d", "Debts", "alice", "debt:manual", amount="40.00"),
+           _old("m", "Food", "", "manual-expense", amount="9.00")]
+    new = (
+        _newe("d", 0, "Debts", "alice", "ruling:debt:d", "-40.00", via="ruling:debt:d"),
+        _newe("m", 0, "Food", None, "ruling:manual:m", "-9.00", via="ruling:manual:m"),
+    )
+    assert compare(old, set(), {"d", "m"}, new).differ == []
+    bad = (replace(new[0], decided_by="rule:x", via=None), new[1])
+    assert compare(old, set(), {"d", "m"}, bad).differ == [("d", "decided_by")]
+
+
+def test_reimbursement_signed_positive():
+    old = [_old("a", "Fuel", "", "reimbursement:manual", amount="100.00", direction="reimbursement")]
+    ok = _newe("a", 0, "Fuel", None, "ruling:reimbursement:a", "100.00", via="ruling:reimbursement:a", direction="reimbursement")
+    assert compare(old, set(), {"a"}, (ok,)).differ == []
+    assert compare(old, set(), {"a"}, (replace(ok, amount=Decimal("-100.00")),)).differ == [("a", "amount")]
+
+
+def test_credit_principal_in_scope():
+    r = _cx([_oex("c1#rest", "credit-principal")], [_nex("c1", "credit-principal")], {"c1"})
+    assert (r.population, r.compared, r.differ, r.old_kept) == (1, 1, [], 0)
+    wrong = _cx([_oex("c1#rest", "credit-principal")], [_nex("c1", "credit-drawdown")], {"c1"})
+    assert wrong.differ == [("c1#rest", "credit-principal", "credit-drawdown")]
+
+
+def test_split_parent_in_scope_by_base_id():
+    r = _cx([_oex("s1#1", "split")], [_nex("s1", "split")], {"s1"})
+    assert (r.population, r.differ) == (1, [])
+    assert _cx([_oex("s1#1", "split")], [_nex("s1", status="kept")], {"s1"}).differ == [("s1#1", "split", "kept")]
+
+
+def test_excluded_out_of_scope_counted():
+    r = _cx([_oex("a"), _oex("gone"), _oex("gone2#1", "split")], [_nex("a")], {"a"})
+    assert r.out_of_scope == ["gone", "gone2#1"] and r.population == 1
