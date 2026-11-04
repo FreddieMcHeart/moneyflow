@@ -3,6 +3,7 @@
 import ast
 import csv
 import itertools
+from collections import Counter
 from datetime import UTC, date, datetime, time
 from decimal import Decimal
 from pathlib import Path
@@ -186,7 +187,12 @@ def read_attribute_rulings(manual: Path) -> tuple[Ruling, ...]:
 
 
 def read_fx_rates(path: Path) -> tuple[FxRate, ...]:
-    """`data/history/usd_rate.csv`, one `fx_rates` row per line with `id = row_id`; a repeated `row_id` refuses."""
+    """`data/history/usd_rate.csv`, one `fx_rates` row per live line with `id = row_id`.
+
+    A row another row `supersedes` is dropped (the old `read_observations`). A repeated `row_id`
+    refuses, and so does more than one live sell or official row on one date: `rate_for` would
+    otherwise pick by row order, which `order by id` does not preserve.
+    """
     with open(path, encoding="utf-8", newline="") as handle:
         rows = list(csv.DictReader(handle))
     seen: set[str] = set()
@@ -194,6 +200,12 @@ def read_fx_rates(path: Path) -> tuple[FxRate, ...]:
         if row["row_id"] in seen:
             raise ValueError(f"duplicate row_id {row['row_id']} in {Path(path).name}")
         seen.add(row["row_id"])
+    superseded = {r["supersedes"] for r in rows if r.get("supersedes")}
+    rows = [r for r in rows if r["row_id"] not in superseded]
+    live = Counter((r["date"], r["kind"]) for r in rows if r["kind"] in ("sell", "official"))
+    for (day, kind), count in sorted(live.items()):
+        if count > 1:
+            raise ValueError(f"more than one live {kind} rate for {day} in {Path(path).name}")
     return tuple(
         FxRate(id=r["row_id"], date=date.fromisoformat(r["date"]), rate=Decimal(r["rate"]), kind=r["kind"], method=r["method"])  # type: ignore[arg-type]
         for r in rows

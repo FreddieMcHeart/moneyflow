@@ -61,5 +61,13 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    # Attribute rulings are operator decisions, never deleted here; outside_cycle rows are derived.
+    attribute = op.get_bind().exec_driver_sql("select count(*) from rulings where kind = 'attribute'").scalar()
+    if attribute:
+        raise RuntimeError(
+            f"downgrade 0004: {attribute} attribute ruling(s) exist; remove them first"
+            " (they are operator decisions, not derived data)"
+        )
+    op.execute("delete from ledger_entries where status = 'outside_cycle'")
     for statement in _DOWN:
         op.execute(statement)
