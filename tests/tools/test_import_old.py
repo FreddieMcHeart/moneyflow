@@ -407,7 +407,7 @@ def test_white_card_split_leg_builds_in_rebuild(conn, tmp_path):
         })
     )
     run(repo, conn)
-    parts = sorted((e.part, e.status, e.category, e.amount) for e in rebuild(conn) if e.transaction_id == "t1")
+    parts = sorted((e.part, e.status, e.category, e.amount) for e in rebuild(conn, today=TODAY) if e.transaction_id == "t1")
     assert parts == [
         (0, "excluded", "misc", Decimal("-30.00")),
         (1, "kept", "food", Decimal("-2.00")),
@@ -486,7 +486,7 @@ def test_manual_transactions_land_kept_in_rebuild_and_survive_reimport(conn, tmp
     repo = _manual_expense_repo(tmp_path)
     run(repo, conn)
     run(repo, conn)
-    kept = {e.transaction_id: (e.status, e.category, e.amount) for e in rebuild(conn) if e.transaction_id.startswith("manual-")}
+    kept = {e.transaction_id: (e.status, e.category, e.amount) for e in rebuild(conn, today=TODAY) if e.transaction_id.startswith("manual-")}
     assert kept == {"manual-1": ("kept", "food", Decimal("-12.30")), "manual-2": ("kept", "Income", Decimal("50.00"))}
 
 
@@ -585,7 +585,7 @@ def test_expense_row_with_drawdown_text_not_excluded_after_import_and_rebuild(co
         )},
     )
     run(repo, conn)
-    entries = {e.transaction_id: e for e in rebuild(conn)}
+    entries = {e.transaction_id: e for e in rebuild(conn, today=TODAY)}
     assert (entries["in1"].status, entries["in1"].reason, entries["in1"].decided_by) == (
         "excluded", "credit-drawdown", "rule:import-exclude-credit-drawdown-2",
     )

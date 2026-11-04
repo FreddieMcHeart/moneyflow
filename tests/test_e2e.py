@@ -6,6 +6,7 @@ from decimal import Decimal
 from moneyflow.services import queries
 from moneyflow.services.rebuild import rebuild
 from tests.api.test_mcp_server import _call, _payload
+from tests.core._builders import TODAY
 from tests.tools.test_import_old import _HEADER, _csv, _old_repo
 from tools.import_old.__main__ import run
 
@@ -48,7 +49,7 @@ def test_import_rebuild_query_mcp(conn, db_url, tmp_path):
 
     # BRIDGE T5-B1: the importer still passes fx_rates=() (T2-B1), so the USD row d1 has no rate; seed one by hand; Task 8 removes it
     conn.execute("insert into fx_rates (id, date, rate, kind, method) values ('t5b1', '2026-01-07', 41.0000, 'official', 'test')")
-    ledger = rebuild(conn)
+    ledger = rebuild(conn, today=TODAY)
     assert sorted((e.transaction_id, e.status, e.category, e.subcategory, e.amount, e.currency) for e in ledger) == [
         ("d1", "kept", "food", "Coffee", Decimal("-3.25"), "USD"),
         ("u1", "kept", "food", "Coffee", Decimal("-120.50"), "UAH"),

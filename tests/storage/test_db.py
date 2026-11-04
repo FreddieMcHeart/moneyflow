@@ -282,6 +282,25 @@ def test_ledger_entry_fx_columns_round_trip(conn):
     assert (bare.budget_month, bare.amount_uah, bare.rate, bare.rate_kind) == (None, None, None, None)
 
 
+def test_save_ledger_writes_cycle_and_fx_columns(conn):
+    usd = replace(
+        _entry("t1", "food"), currency="USD", budget_month="2026-01", amount_uah=Decimal("-415.00"),
+        rate=Decimal("41.5000"), rate_kind="sell",
+    )
+    outside = replace(_entry("t2", "food"), status="outside_cycle")
+    db.save_ledger(conn, (usd, outside))
+    rows = conn.execute(
+        "select transaction_id, status, budget_month, amount_uah, rate, rate_kind"
+        " from ledger_entries order by transaction_id"
+    ).fetchall()
+    assert rows == [
+        {"transaction_id": "t1", "status": "kept", "budget_month": "2026-01", "amount_uah": Decimal("-415.00"),
+         "rate": Decimal("41.5000"), "rate_kind": "sell"},
+        {"transaction_id": "t2", "status": "outside_cycle", "budget_month": None, "amount_uah": None,
+         "rate": None, "rate_kind": None},
+    ]
+
+
 def test_load_inputs_carries_today(conn):
     _write(conn)
     assert db.load_inputs(conn, today=TODAY).today == TODAY
