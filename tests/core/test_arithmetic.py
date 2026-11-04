@@ -22,7 +22,8 @@ def _entry(direction: str, amount: str = "100.00") -> LedgerEntry:
     return LedgerEntry(
         transaction_id="t1", part=0, date=date(2026, 1, 1), account_id="acc1", category="food", subcategory=None,
         amount=Decimal(amount), currency="UAH", status="kept", reason=None, decided_by="rule:r1",
-        direction=direction, via=None,  # type: ignore[arg-type]
+        direction=direction, via=None,
+        budget_month=None, amount_uah=None, rate=None, rate_kind=None,  # type: ignore[arg-type]
     )
 
 

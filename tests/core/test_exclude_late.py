@@ -12,8 +12,10 @@ OWNERS = (
     Owner(id="b", display="b", counterparty_strings=(), budget=False),
 )
 ACCOUNTS = (
-    Account(id="mine", name="mine", currency="UAH", owner="a", role="main", include=True, cash_from=None),
-    Account(id="theirs", name="theirs", currency="UAH", owner="b", role="main", include=True, cash_from=None),
+    Account(id="mine", name="mine", currency="UAH", owner="a", role="main", include=True, cash_from=None,
+            fx_income_floor_step=Decimal("5"), cash_opening=None),
+    Account(id="theirs", name="theirs", currency="UAH", owner="b", role="main", include=True, cash_from=None,
+            fx_income_floor_step=Decimal("5"), cash_opening=None),
 )
 
 
@@ -32,6 +34,10 @@ def entry(account_id: str, category: str | None, status: str = "kept") -> Ledger
         decided_by="rule:r1" if status == "kept" else None,
         direction="expense",
         via=None,
+        budget_month=None,
+        amount_uah=None,
+        rate=None,
+        rate_kind=None,
     )
 
 

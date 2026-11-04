@@ -82,6 +82,7 @@ def run(old_repo: Path, conn: psycopg.Connection) -> dict[str, int]:
         rulings=rulings,
         categories=read_categories(data / "categories.yaml"),
         people=read_people(manual),
+        fx_rates=(),  # BRIDGE T2-B1: no rates imported yet; Task 8 removes it
     )
     for table, n in counts.items():
         print(f"{table}: {n}")

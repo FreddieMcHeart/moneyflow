@@ -24,6 +24,17 @@ class Account:
     role: str
     include: bool
     cash_from: date | None  # non-null marks the cash account and its cutover date
+    fx_income_floor_step: Decimal  # floor step for a USD income row on this account (5 unless the FOP account)
+    cash_opening: Decimal | None  # opening cash balance; set only on the account whose cash_from is set
+
+
+@dataclass(frozen=True)
+class FxRate:
+    id: str
+    date: date
+    rate: Decimal
+    kind: Literal["sell", "official", "effective", "midpoint"]
+    method: str
 
 
 @dataclass(frozen=True)
@@ -67,7 +78,7 @@ class Rule:
 class Ruling:
     id: str
     transaction_id: str
-    kind: Literal["category", "exclude", "white_card", "split", "reimbursement", "debt"]
+    kind: Literal["category", "exclude", "white_card", "split", "reimbursement", "debt", "attribute"]
     payload: Mapping[str, str | None]  # category: category, subcategory, note; exclude: reason, note; white_card: empty
     created_by: str
 
@@ -82,11 +93,15 @@ class LedgerEntry:
     subcategory: str | None
     amount: Decimal  # signed: expense -, income and reimbursement +
     currency: str
-    status: Literal["kept", "excluded", "unresolved"]
+    status: Literal["kept", "excluded", "unresolved", "outside_cycle"]
     reason: str | None
     decided_by: str | None
     direction: Literal["income", "expense", "reimbursement"]  # set by ingest, changed only by reclassify
     via: str | None  # the reclassify rule or ruling that changed the row: rule:<id> / ruling:<id>
+    budget_month: str | None  # "YYYY-MM" of the cycle the row falls in
+    amount_uah: Decimal | None  # signed UAH value; None until converted
+    rate: Decimal | None  # UAH per unit for a converted foreign-currency row
+    rate_kind: str | None
 
 
 @dataclass(frozen=True)
@@ -98,6 +113,8 @@ class Inputs:
     rulings: tuple[Ruling, ...]
     categories: frozenset[str]
     people: tuple[Person, ...]
+    fx_rates: tuple[FxRate, ...]
+    today: date  # filled by services from the clock; core never reads one
 
 
 Ledger = tuple[LedgerEntry, ...]

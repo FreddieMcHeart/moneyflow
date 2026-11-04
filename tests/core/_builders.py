@@ -5,9 +5,12 @@ from decimal import Decimal
 
 from moneyflow.core.model import Account, Inputs, Owner, Person, Rule, Ruling, Transaction
 
+TODAY = date(2026, 1, 31)
+
 
 def account(id: str = "acc1", currency: str = "UAH", include: bool = True) -> Account:
-    return Account(id=id, name=id, currency=currency, owner="o", role="main", include=include, cash_from=None)
+    return Account(id=id, name=id, currency=currency, owner="o", role="main", include=include, cash_from=None,
+                   fx_income_floor_step=Decimal("5"), cash_opening=None)
 
 
 def owner(id: str = "o", budget: bool = True, counterparty_strings: tuple[str, ...] = ()) -> Owner:
@@ -124,4 +127,6 @@ def inputs(
         rulings=rulings,
         categories=categories,
         people=people,
+        fx_rates=(),
+        today=TODAY,
     )

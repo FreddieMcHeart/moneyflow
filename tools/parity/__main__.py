@@ -2,6 +2,7 @@
 
 import argparse
 import csv
+from datetime import date
 from pathlib import Path
 
 import yaml
@@ -91,7 +92,7 @@ def main(argv: list[str] | None = None) -> None:
     data = args.old_repo / "data"
     with db.connect(args.db) as conn:
         new = db.load_ledger(conn)
-        inputs = db.load_inputs(conn)
+        inputs = db.load_inputs(conn, today=date.today())
     raw = set(_raw_ids(data)) | _manual_ids(inputs)
     result = compare(_old_ledger(data), _rule_names(data), raw, new)
     excluded = compare_excluded(_read_csv(data / "excluded.csv"), raw, new, _not_included_ids(inputs))

@@ -26,6 +26,8 @@ def read_accounts(path: Path) -> tuple[Account, ...]:
             id=str(a["id"]), name=str(a["name"]), currency=str(a["currency"]),
             owner=str(a["owner"]), role=str(a["role"]), include=bool(a["include"]),
             cash_from=None,
+            # BRIDGE T2-B2: step 5 and no cash opening are the 0b.2 behaviour; Task 8 reads both from the old repo
+            fx_income_floor_step=Decimal("5"), cash_opening=None,
         )
         for a in _load(path)["accounts"]
     )

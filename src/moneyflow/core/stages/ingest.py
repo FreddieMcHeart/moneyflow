@@ -19,6 +19,10 @@ def _entry(tx: Transaction, include: bool) -> LedgerEntry:
         decided_by=None,
         direction=tx.direction,
         via=None,
+        budget_month=None,
+        amount_uah=None,
+        rate=None,
+        rate_kind=None,
     )
 
 

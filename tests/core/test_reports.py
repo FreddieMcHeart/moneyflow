@@ -30,6 +30,10 @@ def entry(
         decided_by=None,
         direction="expense",
         via=None,
+        budget_month=None,
+        amount_uah=None,
+        rate=None,
+        rate_kind=None,
     )
 
 

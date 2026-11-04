@@ -1,7 +1,7 @@
 """Postgres storage: connection, migration, Inputs/Ledger load and save."""
 
 from collections.abc import Iterable
-from datetime import UTC
+from datetime import UTC, date
 from pathlib import Path
 
 import psycopg
@@ -10,7 +10,7 @@ from alembic.config import Config
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
-from moneyflow.core.model import Account, Inputs, Ledger, LedgerEntry, Owner, Person, Rule, Ruling, Transaction
+from moneyflow.core.model import Account, FxRate, Inputs, Ledger, LedgerEntry, Owner, Person, Rule, Ruling, Transaction
 
 _TABLES = ("owners", "accounts", "transactions", "rules", "rulings", "categories", "people")
 _ALEMBIC_INI = Path(__file__).resolve().parents[3] / "alembic.ini"
@@ -36,7 +36,14 @@ def _owner(r: dict) -> Owner:
 
 
 def _account(r: dict) -> Account:
-    return Account(r["id"], r["name"], r["currency"], r["owner"], r["role"], r["include"], r["cash_from"])
+    return Account(
+        r["id"], r["name"], r["currency"], r["owner"], r["role"], r["include"], r["cash_from"],
+        r["fx_income_floor_step"], r["cash_opening"],
+    )
+
+
+def _fx_rate(r: dict) -> FxRate:
+    return FxRate(r["id"], r["date"], r["rate"], r["kind"], r["method"])
 
 
 def _transaction(r: dict) -> Transaction:
@@ -64,6 +71,7 @@ def _entry(r: dict) -> LedgerEntry:
     return LedgerEntry(
         r["transaction_id"], r["part"], r["date"], r["account_id"], r["category"], r["subcategory"],
         r["amount"], r["currency"], r["status"], r["reason"], r["decided_by"], r["direction"], r["via"],
+        r["budget_month"], r["amount_uah"], r["rate"], r["rate_kind"],
     )
 
 
@@ -71,8 +79,8 @@ def _rows(conn: psycopg.Connection, query: str) -> list[dict]:
     return conn.execute(query).fetchall()  # type: ignore[return-value]
 
 
-def load_inputs(conn: psycopg.Connection) -> Inputs:
-    """Everything the core needs, read from one snapshot; only active rules."""
+def load_inputs(conn: psycopg.Connection, *, today: date) -> Inputs:
+    """Everything the core needs, read from one snapshot; only active rules. `today` comes from the caller."""
     with conn.transaction():
         conn.execute("set transaction isolation level repeatable read")
         return Inputs(
@@ -85,6 +93,8 @@ def load_inputs(conn: psycopg.Connection) -> Inputs:
             rulings=tuple(_ruling(r) for r in _rows(conn, "select * from rulings order by id")),
             categories=frozenset(r["name"] for r in _rows(conn, "select name from categories")),
             people=tuple(_person(r) for r in _rows(conn, "select * from people order by id")),
+            fx_rates=tuple(_fx_rate(r) for r in _rows(conn, "select * from fx_rates order by id")),
+            today=today,
         )
 
 
@@ -100,7 +110,8 @@ def save_ledger(conn: psycopg.Connection, ledger: Ledger) -> None:
     """Replace the stored ledger in one transaction."""
     rows = [
         (e.transaction_id, e.part, e.date, e.account_id, e.category, e.subcategory, e.amount,
-         e.currency, e.status, e.reason, e.decided_by, e.direction, e.via)
+         e.currency, e.status, e.reason, e.decided_by, e.direction, e.via,
+         e.budget_month, e.amount_uah, e.rate, e.rate_kind)
         for e in ledger
     ]
     with conn.transaction():
@@ -108,8 +119,9 @@ def save_ledger(conn: psycopg.Connection, ledger: Ledger) -> None:
         with conn.cursor() as cur:
             cur.executemany(
                 "insert into ledger_entries (transaction_id, part, date, account_id, category, subcategory,"
-                " amount, currency, status, reason, decided_by, direction, via)"
-                " values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                " amount, currency, status, reason, decided_by, direction, via,"
+                " budget_month, amount_uah, rate, rate_kind)"
+                " values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
                 rows,
             )
 
@@ -141,10 +153,13 @@ def _upsert_facts(
     )
     _insert_many(
         conn,
-        "insert into accounts (id, name, currency, owner, role, include, cash_from) values (%s,%s,%s,%s,%s,%s,%s)"
+        "insert into accounts (id, name, currency, owner, role, include, cash_from, fx_income_floor_step,"
+        " cash_opening) values (%s,%s,%s,%s,%s,%s,%s,%s,%s)"
         " on conflict (id) do update set name=excluded.name, currency=excluded.currency,"
-        " owner=excluded.owner, role=excluded.role, include=excluded.include, cash_from=excluded.cash_from",
-        ((a.id, a.name, a.currency, a.owner, a.role, a.include, a.cash_from) for a in accounts),
+        " owner=excluded.owner, role=excluded.role, include=excluded.include, cash_from=excluded.cash_from,"
+        " fx_income_floor_step=excluded.fx_income_floor_step, cash_opening=excluded.cash_opening",
+        ((a.id, a.name, a.currency, a.owner, a.role, a.include, a.cash_from, a.fx_income_floor_step,
+          a.cash_opening) for a in accounts),
     )
     _insert_many(
         conn,
@@ -222,6 +237,15 @@ def _replace_decisions(
     )
 
 
+def _replace_fx_rates(conn: psycopg.Connection, fx_rates: Iterable[FxRate]) -> None:
+    conn.execute("delete from fx_rates")
+    _insert_many(
+        conn,
+        "insert into fx_rates (id, date, rate, kind, method) values (%s,%s,%s,%s,%s)",
+        ((x.id, x.date, x.rate, x.kind, x.method) for x in fx_rates),
+    )
+
+
 def replace_imported(
     conn: psycopg.Connection,
     *,
@@ -232,8 +256,11 @@ def replace_imported(
     rulings: Iterable[Ruling],
     categories: Iterable[str],
     people: Iterable[Person],
+    fx_rates: Iterable[FxRate],
 ) -> dict[str, int]:
     """One transaction: upsert facts by id, replace the `import` decision rows, return counts per table.
+
+    FX rates are replaced whole: the table holds only imported observations.
 
     An import ruling whose transaction is not among the incoming `transactions` survives the
     re-import. Such a ruling can name a category that a later `categories.yaml` drops; `categorize`
@@ -243,4 +270,5 @@ def replace_imported(
     with conn.transaction():
         _upsert_facts(conn, owners, accounts, transactions)
         _replace_decisions(conn, rules, rulings, categories, people, [t.id for t in transactions])
+        _replace_fx_rates(conn, fx_rates)
         return {t: _rows(conn, f"select count(*) as n from {t}")[0]["n"] for t in _TABLES}  # type: ignore[arg-type]

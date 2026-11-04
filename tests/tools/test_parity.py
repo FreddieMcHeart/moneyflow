@@ -24,7 +24,7 @@ def _old(tid, category="Cafe", sub="", rule="r1", currency="UAH", amount="500.00
 def _new(tid, category="Cafe", sub=None, decided_by="rule:r1", currency="UAH", amount="-500.00", part=0):
     return LedgerEntry(
         tid, part, date(2026, 1, 5), "acc1", category, sub, Decimal(amount), currency,
-        "kept", None, decided_by, "expense", None,
+        "kept", None, decided_by, "expense", None, None, None, None, None,
     )
 
 
@@ -101,7 +101,7 @@ def _clean_excluded():
         [{"id": "a", "rule": "excluded:internal-transfer"}],
         {"a"},
         (LedgerEntry("a", 0, date(2026, 1, 5), "acc1", None, None, Decimal("-1.00"), "UAH",
-                     "excluded", "internal-transfer", "core:internal-transfer", "expense", None),),
+                     "excluded", "internal-transfer", "core:internal-transfer", "expense", None, None, None, None, None),),
         set(),
     )
 
@@ -127,7 +127,7 @@ def _oex(tid, reason="internal-transfer"):
 def _nex(tid, reason="internal-transfer", status="excluded"):
     return LedgerEntry(
         tid, 0, date(2026, 1, 5), "acc1", None, None, Decimal("-1.00"), "UAH",
-        status, reason if status == "excluded" else None, f"core:{reason}", "expense", None,
+        status, reason if status == "excluded" else None, f"core:{reason}", "expense", None, None, None, None, None,
     )
 
 
@@ -214,7 +214,7 @@ def test_main_hands_compare_excluded_the_real_allowlists(monkeypatch, tmp_path):
     )
     monkeypatch.setattr(parity_main.db, "connect", lambda url: nullcontext(None))
     monkeypatch.setattr(parity_main.db, "load_ledger", lambda conn: ())
-    monkeypatch.setattr(parity_main.db, "load_inputs", lambda conn: inputs)
+    monkeypatch.setattr(parity_main.db, "load_inputs", lambda conn, *, today: inputs)
     for name in ("_raw_ids", "_old_ledger", "_rule_names", "_read_csv", "compare"):
         monkeypatch.setattr(parity_main, name, lambda *a: [])
     seen = {}
@@ -236,7 +236,7 @@ def _newe(tid, part=0, category="Cafe", sub=None, decided_by="rule:r1", amount="
           status="kept", reason=None):
     return LedgerEntry(
         tid, part, date(2026, 1, 5), "acc1", category, sub, Decimal(amount), "UAH",
-        status, reason, decided_by, direction, via,
+        status, reason, decided_by, direction, via, None, None, None, None,
     )
 
 
@@ -370,7 +370,7 @@ def test_main_prints_rows_outside_budget_cycles_and_keeps_the_exit_code(monkeypa
     (data / "outside_cycles.csv").write_text("id,amount\nx1,1.00\nx2,2.00\n", encoding="utf-8")
     monkeypatch.setattr(parity_main.db, "connect", lambda url: nullcontext(None))
     monkeypatch.setattr(parity_main.db, "load_ledger", lambda conn: ())
-    monkeypatch.setattr(parity_main.db, "load_inputs", lambda conn: NS(accounts=(), transactions=()))
+    monkeypatch.setattr(parity_main.db, "load_inputs", lambda conn, *, today: NS(accounts=(), transactions=()))
     for name in ("_raw_ids", "_old_ledger", "_rule_names"):
         monkeypatch.setattr(parity_main, name, lambda *a: [])
     monkeypatch.setattr(parity_main, "compare", lambda *a: _result())

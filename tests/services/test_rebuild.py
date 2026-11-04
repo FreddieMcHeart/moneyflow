@@ -18,8 +18,7 @@ def _seed(conn, rulings=()):
         transactions=(tx("t1", description="cafe"), tx("t2", description="other")),
         rules=(replace(rule("r1", 10, 0, "food", None, description_contains="cafe"), created_by="import"),),
         rulings=rulings,
-        categories=("food",), people=(),
-    )
+        categories=("food",), people=(), fx_rates=())
 
 
 def test_rebuild_saves_ledger(conn):
@@ -60,8 +59,7 @@ def test_cli_exit_1_on_broken_rule_value(conn, db_url, capsys):
     db.replace_imported(
         conn, owners=(owner(),), accounts=(account(),), transactions=(tx("t1"),),
         rules=(replace(rule("r1", 10, 0, "food", None, amount_lt="abc"), created_by="import"),),
-        rulings=(), categories=("food",), people=(),
-    )
+        rulings=(), categories=("food",), people=(), fx_rates=())
     assert main(["rebuild", "--db", db_url]) == 1
     err = capsys.readouterr().err
     assert err.startswith("refused: rule r1") and "Traceback" not in err
