@@ -46,6 +46,8 @@ def test_import_rebuild_query_mcp(conn, db_url, tmp_path):
     counts = run(_repo(tmp_path), conn)
     assert counts == {"owners": 1, "accounts": 3, "transactions": 5, "rules": 14, "rulings": 1, "categories": 2, "people": 0}
 
+    # BRIDGE T5-B1: the importer still passes fx_rates=() (T2-B1), so the USD row d1 has no rate; seed one by hand; Task 8 removes it
+    conn.execute("insert into fx_rates (id, date, rate, kind, method) values ('t5b1', '2026-01-07', 41.0000, 'official', 'test')")
     ledger = rebuild(conn)
     assert sorted((e.transaction_id, e.status, e.category, e.subcategory, e.amount, e.currency) for e in ledger) == [
         ("d1", "kept", "food", "Coffee", Decimal("-3.25"), "USD"),

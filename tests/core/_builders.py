@@ -3,14 +3,16 @@
 from datetime import date, datetime
 from decimal import Decimal
 
-from moneyflow.core.model import Account, Inputs, Owner, Person, Rule, Ruling, Transaction
+from moneyflow.core.model import Account, FxRate, Inputs, Owner, Person, Rule, Ruling, Transaction
 
 TODAY = date(2026, 1, 31)
 
 
-def account(id: str = "acc1", currency: str = "UAH", include: bool = True, role: str = "main") -> Account:
+def account(
+    id: str = "acc1", currency: str = "UAH", include: bool = True, role: str = "main", income_floor_step: str = "5"
+) -> Account:
     return Account(id=id, name=id, currency=currency, owner="o", role=role, include=include, cash_from=None,
-                   fx_income_floor_step=Decimal("5"), cash_opening=None)
+                   fx_income_floor_step=Decimal(income_floor_step), cash_opening=None)
 
 
 def owner(id: str = "o", budget: bool = True, counterparty_strings: tuple[str, ...] = ()) -> Owner:
@@ -118,6 +120,10 @@ def attribute_ruling(transaction_id: str, month: str | None) -> Ruling:
     )
 
 
+def fx_rate(day: int, rate: str, kind: str = "official", id: str | None = None, month: int = 1) -> FxRate:
+    return FxRate(id=id or f"{kind}-{month}-{day}", date=date(2026, month, day), rate=Decimal(rate), kind=kind, method="test")  # type: ignore[arg-type]
+
+
 def person(id: str, display: str, opening_balance: str = "0", note: str | None = None) -> Person:
     return Person(id=id, display=display, opening_balance=Decimal(opening_balance), note=note)
 
@@ -130,6 +136,7 @@ def inputs(
     categories: frozenset[str] = frozenset({"food", "misc"}),
     owners: tuple[Owner, ...] = (),
     people: tuple[Person, ...] = (),
+    fx_rates: tuple[FxRate, ...] = (),
 ) -> Inputs:
     return Inputs(
         owners=owners or (owner(),),
@@ -139,6 +146,6 @@ def inputs(
         rulings=rulings,
         categories=categories,
         people=people,
-        fx_rates=(),
+        fx_rates=fx_rates,
         today=TODAY,
     )
