@@ -5,9 +5,9 @@ from decimal import Decimal
 import psycopg
 import pytest
 
-from moneyflow.core.model import LedgerEntry, Person, Ruling
+from moneyflow.core.model import LedgerEntry, Ruling
 from moneyflow.storage import db
-from tests.core._builders import account, owner, rule, ruling, tx
+from tests.core._builders import account, owner, person, rule, ruling, tx
 
 
 def _entry(tid: str, category: str, amount: str = "-10.00") -> LedgerEntry:
@@ -209,7 +209,7 @@ def test_new_rule_and_ruling_kinds_accepted_by_db(conn):
 
 
 def test_people_round_trip(conn):
-    people = (Person("alice", "Alice", Decimal("12.50"), "a note"), Person("bob", "Bob", Decimal("0.00"), None))
+    people = (person("alice", "Alice", "12.50", "a note"), person("bob", "Bob", "0.00"))
     counts = _write(conn, people=people)
     assert db.load_inputs(conn).people == people
     assert counts["people"] == 2

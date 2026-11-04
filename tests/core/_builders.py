@@ -83,6 +83,30 @@ def split_ruling(
     return Ruling(id=f"split:{transaction_id}:{n}", transaction_id=transaction_id, kind="split", payload=payload, created_by="test")
 
 
+def reimbursement_ruling(transaction_id: str, category: str, id: str | None = None) -> Ruling:
+    return Ruling(
+        id=id or f"reimbursement:{transaction_id}",
+        transaction_id=transaction_id,
+        kind="reimbursement",
+        payload={"category": category},
+        created_by="test",
+    )
+
+
+def debt_ruling(transaction_id: str, person: str = "alice", kind: str = "lent", id: str | None = None) -> Ruling:
+    return Ruling(
+        id=id or f"debt:{transaction_id}",
+        transaction_id=transaction_id,
+        kind="debt",
+        payload={"person": person, "kind": kind},
+        created_by="test",
+    )
+
+
+def person(id: str, display: str, opening_balance: str = "0", note: str | None = None) -> Person:
+    return Person(id=id, display=display, opening_balance=Decimal(opening_balance), note=note)
+
+
 def inputs(
     transactions: tuple[Transaction, ...] = (),
     rules: tuple[Rule, ...] = (),

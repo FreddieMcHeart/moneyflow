@@ -3,7 +3,7 @@
 Ported from the old `apply_debts` and `check_debts`, the checks one build can see: UAH only, kind
 matches the bank direction, known person, running balance never below zero. Not ported: "no Debts
 row without an entry" (a Debts category can now only come from a debt ruling or a categorize rule,
-and a categorize rule on a kept entry is not a debt check), "outside every budget cycle" (0b.3).
+and a categorize rule on a kept entry is not a debt check), "outside every budget cycle" (0b.3, once cycles exist).
 """
 
 from decimal import Decimal
