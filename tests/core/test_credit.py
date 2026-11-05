@@ -132,3 +132,22 @@ def test_drawdown_at_the_same_moment_not_paired():
     out = _pair([_drawdown(day=5), _repayment(day=5)])
     (entry,) = _parts(out, "r1")
     assert entry.status == "unresolved"
+
+
+def test_an_inactive_repayment_rule_is_ignored():
+    inp = inputs(transactions=(_drawdown(), _repayment()), rules=(replace(_repay_rule(), active=False),), categories=CATS)
+    entries = [
+        replace(e, status="excluded", reason="credit-drawdown", decided_by="rule:x") if e.transaction_id == "d1" else e
+        for e in ingest([], inp)
+    ]
+    assert pair_credit(entries, inp) == entries
+
+
+@pytest.mark.parametrize("changes", [{"status": "kept"}, {"via": "rule:x"}, {"direction": "income"}, {"part": 1}])
+def test_only_an_open_untouched_whole_expense_is_a_repayment(changes):
+    inp = inputs(transactions=(_drawdown(), _repayment()), rules=(_repay_rule(),), categories=CATS)
+    entries = [
+        replace(e, status="excluded", reason="credit-drawdown", decided_by="rule:x") if e.transaction_id == "d1" else replace(e, **changes)
+        for e in ingest([], inp)
+    ]
+    assert pair_credit(entries, inp) == entries

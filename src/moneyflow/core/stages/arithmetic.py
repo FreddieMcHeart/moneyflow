@@ -56,5 +56,5 @@ def arithmetic(entries: list[LedgerEntry], inputs: Inputs) -> list[LedgerEntry]:
     rates = _rates(entries, inputs)
     return [
         _convert(e, rate, income_steps) if e.status in _CONVERTED else replace(e, amount=_sign(e) * e.amount)
-        for e, rate in zip(entries, rates, strict=True)
+        for e, rate in zip(entries, rates)
     ]

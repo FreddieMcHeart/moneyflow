@@ -105,3 +105,8 @@ def test_blessed_leg_beats_cashback_text():
     )
     got = {e.transaction_id: (e.reason, e.decided_by) for e in build(inp)}
     assert got["in"] == ("internal-transfer", "ruling:exclude:internal-transfer:in")
+
+
+def test_a_ruling_that_is_not_a_white_card_keeps_the_leg_in_the_pool():
+    rulings = (ruling("override:out", "out", "food"),)
+    assert pairs(leg("out", "a1", "expense"), leg("in", "a2", "income", 1), rulings=rulings) == {"out", "in"}

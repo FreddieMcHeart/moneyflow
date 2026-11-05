@@ -236,3 +236,35 @@ def test_category_totals_refuses_month_with_dates_or_nothing():
         category_totals(())
     with pytest.raises(BuildRefused):
         category_totals((), start=FROM)
+
+
+@pytest.mark.parametrize("dates", [{"start": FROM}, {"end": TO}])
+def test_category_totals_refuses_a_month_with_either_date(dates):
+    with pytest.raises(BuildRefused, match="not both"):
+        category_totals((), budget_month="2026-01", **dates)
+
+
+def test_one_day_closed_cycle_has_a_length_of_one():
+    (one,) = month_summaries((), (Cycle("2026-01", date(2026, 1, 5), date(2026, 1, 5)),), _inp())
+    assert (one.days_total, one.days_left) == (1, 0)
+
+
+def test_cash_in_hand_counts_spending_on_the_cutover_day_and_the_cycle_end_day():
+    ledger = (
+        entry("-30.00", day=10, account_id="cash", budget_month="2026-01", tid="first"),
+        entry("-5.00", day=31, account_id="cash", budget_month="2026-01", tid="last"),
+        entry("-1.00", day=9, account_id="cash", budget_month="2026-01", tid="before"),
+        entry("-2.00", day=1, month=2, account_id="cash", budget_month="2026-01", tid="after"),
+    )
+    assert cash_in_hand(JAN, ledger, _inp(accounts=(CARD, CASH))) == Decimal("65.00")
+
+
+@pytest.mark.parametrize("changes", [{"status": "kept", "budget_month": None}, {"status": "excluded", "reason": "x", "budget_month": "2026-01"}])
+def test_cash_spending_counts_only_when_open_and_in_a_cycle(changes):
+    ledger = (entry("-30.00", day=15, account_id="cash", **changes),)
+    assert cash_in_hand(JAN, ledger, _inp(accounts=(CARD, CASH))) == Decimal("100.00")
+
+
+def test_open_cycle_days_total_is_the_length_of_the_cycle_just_before_it():
+    cycles = (Cycle("2026-01", date(2026, 1, 1), date(2026, 1, 10)), Cycle("2026-02", date(2026, 1, 11), date(2026, 2, 9)), FEB_OPEN)
+    assert [s.days_total for s in month_summaries((), cycles, _inp())] == [10, 30, 30]
