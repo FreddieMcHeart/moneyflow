@@ -13,6 +13,8 @@ from urllib.parse import quote
 ROOT = Path(__file__).resolve().parents[2]
 COMPOSE_FILE = "deploy/compose.yml"
 PLACEHOLDER_OLD_REPO = "/path/to/old/repo"
+BIND_DIRS = (".local/pg",)  # every ../.local/... bind mount in deploy/compose.yml; must exist before compose up
+PLACEHOLDER_PASSWORD = "change-me"
 GENERATED = ("POSTGRES_PASSWORD", "MF_READER_PASSWORD", "MB_DB_PASSWORD", "MB_ADMIN_PASSWORD")
 
 Runner = Callable[..., int]
@@ -42,6 +44,20 @@ def read_env(path: Path) -> dict[str, str]:
     return values
 
 
+def new_password() -> str:
+    """Random, and always holding a digit, a lowercase and an uppercase letter (Metabase rejects weaker ones)."""
+    while True:
+        value = secrets.token_urlsafe(24)
+        if any(c.isdigit() for c in value) and value.lower() != value and value.upper() != value:
+            return value
+
+
+def check_passwords(env: dict[str, str]) -> None:
+    for key in GENERATED:
+        if env.get(key, "") in ("", PLACEHOLDER_PASSWORD):
+            raise Refused(f"{key} in .env is empty or still the placeholder; set a real password and run again")
+
+
 def ensure_env(root: Path) -> bool:
     """Create .env from .env.example with random passwords. Never overwrites. True if created."""
     target = root / ".env"
@@ -49,7 +65,7 @@ def ensure_env(root: Path) -> bool:
         return False
     text = (root / ".env.example").read_text()
     for key in GENERATED:
-        text = re.sub(rf"^{key}=.*$", lambda _m, k=key: f"{k}={secrets.token_urlsafe(24)}", text, flags=re.M)
+        text = re.sub(rf"^{key}=.*$", lambda _m, k=key: f"{k}={new_password()}", text, flags=re.M)
     with open(target, "x") as handle:
         handle.write(text)
     target.chmod(0o600)
@@ -91,10 +107,13 @@ def up(root: Path, runner: Runner, *, which: Which = shutil.which, environ: dict
         if ensure_env(root):
             out("created .env with random passwords (not shown)")
         env = read_env(root / ".env")
+        check_passwords(env)
         check_old_repo(env)
     except Refused as refusal:
         out(f"refused: {refusal}")
         return 2
+    for rel in BIND_DIRS:
+        (root / rel).mkdir(parents=True, exist_ok=True)
     steps: list[tuple[str, Callable[[], int]]] = [
         ("containers", lambda: runner(_compose_cmd(compose, root, "up", "-d", "--wait"))),
         ("migrations", lambda: runner(_py("alembic", "upgrade", "head"), env={"MONEYFLOW_DATABASE_URL": local_url(env)})),

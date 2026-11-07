@@ -148,3 +148,54 @@ def test_refresh_and_stop(tmp_path):
     r2 = Runner()
     local.stop(tmp_path, r2, which=_which("docker"))
     assert r2.calls[-1][0][-1] == "stop"
+
+
+def test_password_generator_retries_until_digit_lower_and_upper(monkeypatch):
+    feed = iter(["NoDigitsHereAtAll", "alllower1234", "ALLUPPER1234", "Good1Value"])
+    monkeypatch.setattr(local.secrets, "token_urlsafe", lambda n: next(feed))
+    assert local.new_password() == "Good1Value"
+
+
+def test_generated_env_passwords_all_have_digit_lower_and_upper(tmp_path):
+    for i in range(30):
+        d = tmp_path / str(i)
+        d.mkdir()
+        (d / ".env.example").write_text(EXAMPLE)
+        ensure_env(d)
+        for key in local.GENERATED:
+            value = read_env(d / ".env")[key]
+            assert any(c.isdigit() for c in value) and value.lower() != value and value.upper() != value
+
+
+def test_up_creates_bind_dirs_before_the_compose_call(tmp_path):
+    root = _root(tmp_path)
+    seen = []
+
+    class Checking(Runner):
+        def __call__(self, cmd, env=None):
+            if "up" in cmd and "compose" in cmd:
+                seen.extend((root / rel).is_dir() for rel in local.BIND_DIRS)
+            return super().__call__(cmd, env)
+
+    assert local.up(root, Checking(), which=_which("docker"), out=lambda s: None) == 0
+    assert seen and all(seen)
+
+
+def test_bind_dirs_cover_every_local_bind_mount_in_compose():
+    import yaml
+
+    compose = yaml.safe_load((local.ROOT / local.COMPOSE_FILE).read_text())
+    mounts = {v.split(":", 1)[0] for s in compose["services"].values() for v in s.get("volumes", []) if v.startswith("../.local/")}
+    assert mounts == {"../" + rel for rel in local.BIND_DIRS}
+
+
+@pytest.mark.parametrize("value", ["", "change-me"])
+def test_up_refuses_empty_or_placeholder_password_naming_only_the_key(tmp_path, value):
+    root = _root(tmp_path)
+    text = (root / ".env").read_text().replace(read_env(root / ".env")["MB_ADMIN_PASSWORD"], value)
+    (root / ".env").write_text(text)
+    r, lines = Runner(), []
+    assert local.up(root, r, which=_which("docker"), out=lines.append) == 2
+    assert _kinds(r) == []
+    assert any("MB_ADMIN_PASSWORD" in line for line in lines)
+    assert not any("change-me" in line for line in lines)

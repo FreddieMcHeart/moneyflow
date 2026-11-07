@@ -39,7 +39,7 @@ The test database and the dev database are separate. If the container exists but
 
 ## Which Postgres
 
-`mf-pg` on 5433 is for tests only (`moneyflow_test`). The local environment (`./local.sh up`, see README) runs its own Postgres on 5434 with `moneyflow_dev`. Tests never use `moneyflow_dev`, and nothing deletes `mf-pg`.
+`mf-pg` on 5433 is for tests only (`moneyflow_test`). The local environment (`./local.sh up`, see README) runs its own Postgres on 5434 with `moneyflow_dev`. Tests never use `moneyflow_dev`, and nothing deletes `mf-pg`. The local environment publishes its ports on `127.0.0.1` only, and `./local.sh up` refuses empty or `change-me` passwords in `.env`.
 
 ## Quality gates
 

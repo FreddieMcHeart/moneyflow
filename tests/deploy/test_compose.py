@@ -37,7 +37,7 @@ def test_postgres_data_is_a_bind_mount_under_local():
 def test_app_database_is_moneyflow_dev_on_port_5434_by_default():
     postgres = _compose()["services"]["postgres"]
     assert postgres["environment"]["POSTGRES_DB"] == "moneyflow_dev"
-    assert postgres["ports"] == ["${MF_PG_PORT:-5434}:5432"]
+    assert postgres["ports"] == ["127.0.0.1:${MF_PG_PORT:-5434}:5432"]
 
 
 def test_no_literal_password_in_compose():
@@ -53,3 +53,9 @@ def test_env_example_lists_every_variable():
         "MB_DB_PASSWORD", "MB_ADMIN_EMAIL", "MB_ADMIN_PASSWORD", "MF_OLD_REPO",
     ):
         assert re.search(rf"^{name}=", text, re.M), name
+
+
+def test_published_ports_are_bound_to_loopback_only():
+    for name, service in _compose()["services"].items():
+        for port in service.get("ports", []):
+            assert port.startswith("127.0.0.1:"), (name, port)

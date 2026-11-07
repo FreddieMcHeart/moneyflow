@@ -1,8 +1,10 @@
 """Metabase provisioner: a tiny REST client (urllib only) and an idempotent upsert-by-name."""
 
 import json
+import re
 import urllib.error
 import urllib.request
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -12,7 +14,19 @@ READER_ROLE = "mf_reader"  # N5: the data connection is read-only, never the own
 
 
 class ApiError(Exception):
-    """Carries the method, path and status only: a response body could echo a secret."""
+    """Method, path, status and Metabase's own error text (truncated). Never the request body."""
+
+
+def _error_text(error: urllib.error.HTTPError) -> str:
+    try:
+        payload = json.loads(error.read())
+    except (ValueError, OSError):
+        return ""
+    detail = payload.get("errors") or payload.get("message") if isinstance(payload, dict) else None
+    if not detail:
+        return ""
+    text = detail if isinstance(detail, str) else json.dumps(detail)
+    return ": " + text[:200]
 
 
 class Client:
@@ -31,7 +45,7 @@ class Client:
             with urllib.request.urlopen(req, timeout=self.timeout) as response:
                 raw = response.read()
         except urllib.error.HTTPError as error:
-            raise ApiError(f"{method} {path} -> HTTP {error.code}") from None
+            raise ApiError(f"{method} {path} -> HTTP {error.code}{_error_text(error)}") from None
         except urllib.error.URLError as error:
             raise ApiError(f"{method} {path} -> unreachable ({type(error.reason).__name__})") from None
         return json.loads(raw) if raw else None
@@ -101,25 +115,47 @@ def _ensure_collection(client: Client, counts: Counts) -> int:
     return created["id"]
 
 
-def _card_body(card: dict, database_id: int, collection_id: int) -> dict:
+TAG_VAR = re.compile(r"\{\{\s*(\w+)\s*\}\}")
+
+
+def _template_tags(sql: str, parameters: list[dict] | None) -> dict[str, dict]:
+    types = {p["name"]: p.get("type", "text") for p in parameters or []}
+    return {
+        name: {"id": str(uuid.uuid5(uuid.NAMESPACE_URL, f"moneyflow/{name}")), "name": name,
+               "display-name": name.replace("_", " ").title(), "type": types.get(name, "text")}
+        for name in dict.fromkeys(TAG_VAR.findall(sql))
+    }
+
+
+def _card_body(card: dict, database_id: int, collection_id: int, parameters: list[dict] | None = None) -> dict:
+    native = {"query": card["sql"], "template-tags": _template_tags(card["sql"], parameters)}
     return {
         "name": card["name"],
         "collection_id": collection_id,
         "display": card["display"],
-        "dataset_query": {"type": "native", "database": database_id, "native": {"query": card["sql"]}},
+        "dataset_query": {"type": "native", "database": database_id, "native": native},
         "visualization_settings": card.get("visualization_settings", {}),
     }
 
 
+def _tag_view(tags: dict | None) -> dict:
+    """Only what we set and Metabase keeps as is: it rewrites ids and display names and adds keys."""
+    return {name: tag.get("type") for name, tag in (tags or {}).items()}
+
+
 def _card_differs(existing: dict, wanted: dict) -> bool:
     native = (existing.get("dataset_query") or {}).get("native") or {}
-    return (native.get("query") != wanted["dataset_query"]["native"]["query"]
+    want_native = wanted["dataset_query"]["native"]
+    stored_viz = existing.get("visualization_settings") or {}
+    return (native.get("query") != want_native["query"]
+            or _tag_view(native.get("template-tags")) != _tag_view(want_native["template-tags"])
             or existing.get("display") != wanted["display"]
-            or (existing.get("visualization_settings") or {}) != wanted["visualization_settings"])
+            or any(stored_viz.get(k) != v for k, v in wanted["visualization_settings"].items()))
 
 
-def _upsert_card(client: Client, card: dict, database_id: int, collection_id: int, existing: dict[str, dict], counts: Counts) -> int:
-    wanted = _card_body(card, database_id, collection_id)
+def _upsert_card(client: Client, card: dict, database_id: int, collection_id: int, existing: dict[str, dict], counts: Counts,
+                 parameters: list[dict] | None = None) -> int:
+    wanted = _card_body(card, database_id, collection_id, parameters)
     current = existing.get(card["name"])
     if current is None:
         created = client.post("/api/card", wanted)
@@ -176,6 +212,6 @@ def provision(client: Client, env: dict[str, str], definitions: list[dict]) -> C
     cards = {c["name"]: c for c in _items(client.get("/api/card")) if c.get("collection_id") == collection_id}
     dashboards = {d["name"]: d for d in _items(client.get("/api/dashboard")) if d.get("collection_id") == collection_id}
     for definition in definitions:
-        card_ids = [_upsert_card(client, card, database_id, collection_id, cards, counts) for card in definition["cards"]]
+        card_ids = [_upsert_card(client, card, database_id, collection_id, cards, counts, definition.get("parameters")) for card in definition["cards"]]
         _upsert_dashboard(client, definition, card_ids, collection_id, dashboards, counts)
     return counts

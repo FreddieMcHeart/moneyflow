@@ -177,3 +177,80 @@ def test_always_put_version_is_caught(fake, monkeypatch):
     monkeypatch.setattr(api, "_card_differs", lambda *a: True)
     provision(Client(fake.url), ENV, DEFS)
     assert len(fake.writes()) > before
+
+
+def test_api_error_carries_metabase_message_but_never_the_request_password(fake, monkeypatch):
+    from tools.metabase.api import ApiError
+
+    monkeypatch.setattr(FakeMetabase, "route", lambda self, m, p, b: ({"errors": {"password": "password is too common"}}, 400))
+    with pytest.raises(ApiError) as caught:
+        Client(fake.url).post("/api/setup", {"user": {"password": "request-secret-xyz"}})
+    assert "password is too common" in str(caught.value) and "400" in str(caught.value)
+    assert "request-secret-xyz" not in str(caught.value)
+
+
+def test_api_error_truncates_a_long_body(fake, monkeypatch):
+    from tools.metabase.api import ApiError
+
+    monkeypatch.setattr(FakeMetabase, "route", lambda self, m, p, b: ({"message": "x" * 5000}, 500))
+    with pytest.raises(ApiError) as caught:
+        Client(fake.url).get("/api/card")
+    assert len(str(caught.value)) < 500
+
+
+def test_every_dashboard_card_variable_has_a_template_tag():
+    import re
+    from pathlib import Path
+
+    from tools.metabase.api import _card_body, load_definitions
+
+    directory = Path(__file__).resolve().parents[2] / "deploy" / "metabase" / "dashboards"
+    seen = 0
+    for definition in load_definitions(directory):
+        for card in definition["cards"]:
+            body = _card_body(card, 1, 2, definition.get("parameters"))
+            tags = body["dataset_query"]["native"].get("template-tags", {})
+            for var in re.findall(r"\{\{\s*(\w+)\s*\}\}", card["sql"]):
+                seen += 1
+                assert var in tags and tags[var]["name"] == var and tags[var]["type"], (card["name"], var)
+            assert set(tags) == set(re.findall(r"\{\{\s*(\w+)\s*\}\}", card["sql"]))
+    assert seen >= 4
+
+
+def test_declared_dashboard_parameter_type_is_used_for_the_tag():
+    from tools.metabase.api import _card_body
+
+    card = {"name": "c", "sql": "select 1 [[where d = {{day}}]]", "display": "table"}
+    body = _card_body(card, 1, 2, [{"name": "day", "type": "date"}])
+    assert body["dataset_query"]["native"]["template-tags"]["day"]["type"] == "date"
+
+
+class EchoingMetabase(FakeMetabase):
+    """Stores cards the way the real one does: adds ids and extra keys, rewrites template-tag ids and display names."""
+
+    def route(self, method, path, body):
+        if path.startswith("/api/card") and method in ("POST", "PUT") and body:
+            body = json.loads(json.dumps(body))
+            body["entity_id"] = "ent-" + body["name"]
+            body["archived"] = False
+            body["visualization_settings"] = {**body["visualization_settings"], "table.cell_column": "x"}
+            native = body["dataset_query"]["native"]
+            native["template-tags"] = {
+                k: {**t, "id": "server-" + k, "display-name": t["display-name"].lower(), "required": False}
+                for k, t in native.get("template-tags", {}).items()}
+        return super().route(method, path, body)
+
+
+def test_second_provision_of_unchanged_json_updates_nothing_against_an_echoing_metabase():
+    fake = EchoingMetabase()
+    try:
+        defs = json.loads(json.dumps(DEFS))
+        defs[0]["cards"][0]["sql"] = "select 1 [[where a = {{a_var}}]]"
+        provision(Client(fake.url), ENV, defs)
+        before = len(fake.writes())
+        counts = provision(Client(fake.url), ENV, defs)
+        assert counts.updated == 0 and len(fake.writes()) == before
+        defs[0]["cards"][0]["sql"] = "select 2 [[where a = {{a_var}}]]"
+        assert provision(Client(fake.url), ENV, defs).updated == 1
+    finally:
+        fake.server.shutdown()

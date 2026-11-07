@@ -10,7 +10,8 @@ AGENTS = (ROOT / "AGENTS.md").read_text()
 def test_readme_documents_the_local_environment() -> None:
     for needle in ("## Local environment", "./local.sh up", "./local.sh stop", "./local.sh status",
                    "./local.sh refresh", "MF_OLD_REPO", "MB_ADMIN_EMAIL", "deploy/metabase/dashboards",
-                   "overwritten", ".local/"):
+                   "overwritten", ".local/", "127.0.0.1", "podman only", "about 2 GB", "DOCKER_HOST", "ssh -L",
+                   "/run/podman/podman.sock", "change-me"):
         assert needle in README, needle
 
 

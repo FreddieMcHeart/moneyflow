@@ -16,7 +16,7 @@ services:
       - ../deploy/postgres/init:/docker-entrypoint-initdb.d:ro
       - ../deploy/postgres/reader.sql:/opt/moneyflow/reader.sql:ro
     ports:
-      - "${MF_PG_PORT:-5434}:5432"
+      - "127.0.0.1:${MF_PG_PORT:-5434}:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres -d moneyflow_dev"]
       interval: 5s
@@ -33,7 +33,7 @@ services:
       MB_DB_USER: metabase
       MB_DB_PASS: ${MB_DB_PASSWORD:?set MB_DB_PASSWORD in .env}
     ports:
-      - "${MF_MB_PORT:-3000}:3000"
+      - "127.0.0.1:${MF_MB_PORT:-3000}:3000"
     depends_on:
       postgres:
         condition: service_healthy

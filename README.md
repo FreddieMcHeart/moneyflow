@@ -59,7 +59,11 @@ cp .env.example .env     # optional: `./local.sh up` creates .env with random pa
 - **URLs.** Postgres on `localhost:5434` (database `moneyflow_dev`), Metabase on `http://localhost:3000`. Both ports are set in `.env` (`MF_PG_PORT`, `MF_MB_PORT`).
 - **Metabase first login.** Use `MB_ADMIN_EMAIL` and `MB_ADMIN_PASSWORD` from `.env`.
 - **Dashboards.** The JSON definitions are in `deploy/metabase/dashboards/` (Month, Categories by cycle, Transactions). They are native SQL, upserted by name into the collection "MoneyFlow (provisioned)". Edits made in the Metabase UI inside that collection are overwritten by the next `up`; change the JSON instead.
-- **Reset.** There is no reset command: `./local.sh stop`, then delete `.local/` by hand.
+- **Reset.** There is no reset command: `./local.sh stop`, then delete `.local/` by hand. The next `./local.sh up` recreates the bind directories under `.local/` before it starts the containers.
+- **Passwords.** `up` refuses to start while a password in `.env` is empty or still `change-me`; the message names the key only. Both ports are published on `127.0.0.1` only.
+- **Runtimes.** The local environment was tested on podman only, not on Docker Desktop.
+- **Memory.** Measured: postgres uses about 90 MB and metabase about 1 GB, so the VM needs about 2 GB free.
+- **podman without a socket file.** If the host has no podman API socket file, compose can reach the machine's socket over ssh: forward the machine's `/run/podman/podman.sock` to a local unix socket with `ssh -L`, and point `DOCKER_HOST` at that local socket.
 
 ### Which Postgres
 
