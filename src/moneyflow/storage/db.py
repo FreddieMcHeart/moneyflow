@@ -2,6 +2,7 @@
 
 from collections.abc import Iterable
 from datetime import UTC, date
+from decimal import Decimal
 from pathlib import Path
 from typing import NamedTuple
 
@@ -12,6 +13,7 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
 from moneyflow.core.model import Account, FxRate, Inputs, Ledger, LedgerEntry, Owner, Person, Rule, Ruling, Transaction
+from moneyflow.core.reports import MonthSummary
 
 _TABLES = ("owners", "accounts", "transactions", "rules", "rulings", "categories", "people")
 _TABLE_ORDER = ("owners", "accounts", "transactions", "rules", "rulings", "categories", "people", "fx_rates")
@@ -108,16 +110,29 @@ def stale_transaction_ids(conn: psycopg.Connection, source_ids: Iterable[str]) -
     return [r["id"] for r in rows]  # type: ignore[index]
 
 
-def save_ledger(conn: psycopg.Connection, ledger: Ledger) -> None:
-    """Replace the stored ledger in one transaction."""
+def save_ledger(
+    conn: psycopg.Connection, ledger: Ledger, *, summaries: Iterable[MonthSummary], built_for: date
+) -> None:
+    """Replace the stored ledger and its month summaries in one transaction.
+
+    `summaries` come from `core.reports.month_summaries`; one row is written per (budget month, currency) that
+    has income or actual spending, and `built_for` is the `today` they were computed for. Nothing is summed here.
+    """
     rows = [
         (e.transaction_id, e.part, e.date, e.account_id, e.category, e.subcategory, e.amount,
          e.currency, e.status, e.reason, e.decided_by, e.direction, e.via,
          e.budget_month, e.amount_uah, e.rate, e.rate_kind)
         for e in ledger
     ]
+    summary_rows = [
+        (s.budget_month, currency, s.income.get(currency, Decimal(0)), s.total_actual.get(currency, Decimal(0)),
+         s.cycle_start, s.cycle_end, s.cycle_open, s.days_total, s.days_left, s.cash_in_hand, built_for)
+        for s in summaries
+        for currency in sorted(set(s.income) | set(s.total_actual))
+    ]
     with conn.transaction():
         conn.execute("delete from ledger_entries")
+        conn.execute("delete from month_summaries")
         with conn.cursor() as cur:
             cur.executemany(
                 "insert into ledger_entries (transaction_id, part, date, account_id, category, subcategory,"
@@ -125,6 +140,12 @@ def save_ledger(conn: psycopg.Connection, ledger: Ledger) -> None:
                 " budget_month, amount_uah, rate, rate_kind)"
                 " values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
                 rows,
+            )
+            cur.executemany(
+                "insert into month_summaries (budget_month, currency, income, total_actual, cycle_start,"
+                " cycle_end, cycle_open, days_total, days_left, cash_in_hand, built_for)"
+                " values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                summary_rows,
             )
 
 

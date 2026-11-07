@@ -8,7 +8,7 @@ from psycopg.conninfo import conninfo_to_dict
 
 from moneyflow.storage import db
 
-_TABLES = "fx_rates, ledger_entries, rulings, rules, categories, people, transactions, accounts, owners"
+_TABLES = "fx_rates, month_summaries, ledger_entries, rulings, rules, categories, people, transactions, accounts, owners"
 
 
 def require_test_db(url: str) -> None:

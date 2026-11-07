@@ -59,9 +59,9 @@ def test_inactive_rules_are_not_loaded(conn):
 
 
 def test_save_ledger_replaces(conn):
-    db.save_ledger(conn, (_entry("t1", "food"), _entry("t2", "misc")))
+    db.save_ledger(conn, (_entry("t1", "food"), _entry("t2", "misc")), summaries=(), built_for=date(2026, 1, 1))
     second = (_entry("t3", "misc", "-5.25"),)
-    db.save_ledger(conn, second)
+    db.save_ledger(conn, second, summaries=(), built_for=date(2026, 1, 1))
     assert db.load_ledger(conn) == second
 
 
@@ -269,7 +269,7 @@ def test_attribute_ruling_kind_accepted_by_db(conn):
 
 def test_outside_cycle_status_accepted_by_db(conn):
     entry = replace(_entry("t1", "food"), status="outside_cycle")
-    db.save_ledger(conn, (entry,))
+    db.save_ledger(conn, (entry,), summaries=(), built_for=date(2026, 1, 1))
     assert db.load_ledger(conn) == (entry,)
 
 
@@ -279,7 +279,7 @@ def test_ledger_entry_fx_columns_round_trip(conn):
         rate=Decimal("41.5000"), rate_kind="sell",
     )
     bare = _entry("t2", "food")
-    db.save_ledger(conn, (entry, bare))
+    db.save_ledger(conn, (entry, bare), summaries=(), built_for=date(2026, 1, 1))
     assert db.load_ledger(conn) == (entry, bare)
     assert (bare.budget_month, bare.amount_uah, bare.rate, bare.rate_kind) == (None, None, None, None)
 
@@ -290,7 +290,7 @@ def test_save_ledger_writes_cycle_and_fx_columns(conn):
         rate=Decimal("41.5000"), rate_kind="sell",
     )
     outside = replace(_entry("t2", "food"), status="outside_cycle")
-    db.save_ledger(conn, (usd, outside))
+    db.save_ledger(conn, (usd, outside), summaries=(), built_for=date(2026, 1, 1))
     rows = conn.execute(
         "select transaction_id, status, budget_month, amount_uah, rate, rate_kind"
         " from ledger_entries order by transaction_id"
