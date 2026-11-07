@@ -256,7 +256,7 @@ def test_override_for_absent_transaction_is_reported_not_imported(conn, tmp_path
     out = capsys.readouterr().out
     assert "not imported: 1 overrides for transactions outside phase 0 input" in out
     assert "manual-0" in out
-    assert counts["rulings"] == 2
+    assert counts["rulings"].inserted == 2
     assert [r.transaction_id for r in db.load_inputs(conn, today=TODAY).rulings] == ["t1", "t2"]
 
 
@@ -267,7 +267,7 @@ def test_imported_ruling_count_matches_overrides(conn, tmp_path, capsys):
     overrides = read_overrides(repo / "data" / "manual.yaml")
     assert len(overrides) == 5
     assert "not imported: 3 overrides" in out
-    assert counts["rulings"] == len(overrides) - 3
+    assert counts["rulings"].inserted == len(overrides) - 3
 
 
 def test_reimport_is_idempotent_and_keeps_non_import_rows(conn, tmp_path):
@@ -278,8 +278,10 @@ def test_reimport_is_idempotent_and_keeps_non_import_rows(conn, tmp_path):
         " values ('op1', 't1', 'category', '{\"category\": \"misc\", \"subcategory\": null}', 'operator')"
     )
     second = run(repo, conn)
-    assert first == {"owners": 1, "accounts": 2, "transactions": 2, "rules": 13, "rulings": 2, "categories": 2, "people": 0}
-    assert second == {**first, "rulings": 3}
+    assert {t: c.inserted for t, c in first.items()} == {
+        "owners": 1, "accounts": 2, "transactions": 2, "rules": 13, "rulings": 2, "categories": 2, "people": 0,
+        "fx_rates": 0}
+    assert second == {t: (0, 0, 0, c.inserted) for t, c in first.items()}  # the operator ruling is not counted
     assert {r.id for r in db.load_inputs(conn, today=TODAY).rulings} == {"override:t1", "override:t2", "op1"}
 
 
@@ -291,7 +293,7 @@ def test_stored_transaction_gone_from_source_is_reported_not_deleted(conn, tmp_p
     counts = run(repo, conn)
     out = capsys.readouterr().out
     assert "not in source: 1 stored transactions\n  t2\n" in out
-    assert counts["transactions"] == 2
+    assert counts["transactions"] == (0, 0, 0, 1)  # t1 only; t2 is stale, untouched
     assert [t.id for t in db.load_inputs(conn, today=TODAY).transactions] == ["t1", "t2"]
 
 
@@ -612,7 +614,7 @@ def test_reimport_of_exclude_inputs_is_idempotent(conn, tmp_path):
     first = run(repo, conn)
     stored = {(g.id, g.kind) for g in db.load_inputs(conn, today=TODAY).rulings}
     second = run(repo, conn)
-    assert second == first
+    assert second == {t: (0, 0, 0, c.inserted) for t, c in first.items()}
     assert {(g.id, g.kind) for g in db.load_inputs(conn, today=TODAY).rulings} == stored
 
 

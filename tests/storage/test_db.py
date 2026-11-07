@@ -48,7 +48,9 @@ def test_round_trip_inputs(conn):
     assert got.rules[0].result == {"category": "food", "subcategory": "cafe"}
     assert got.rulings == rulings
     assert got.categories == frozenset({"food", "misc"})
-    assert counts == {"owners": 1, "accounts": 1, "transactions": 2, "rules": 1, "rulings": 1, "categories": 2, "people": 0}
+    assert {t: c.inserted for t, c in counts.items()} == {
+        "owners": 1, "accounts": 1, "transactions": 2, "rules": 1, "rulings": 1, "categories": 2, "people": 0,
+        "fx_rates": 0}
 
 
 def test_inactive_rules_are_not_loaded(conn):
@@ -212,7 +214,7 @@ def test_people_round_trip(conn):
     people = (person("alice", "Alice", "12.50", "a note"), person("bob", "Bob", "0.00"))
     counts = _write(conn, people=people)
     assert db.load_inputs(conn, today=TODAY).people == people
-    assert counts["people"] == 2
+    assert counts["people"] == (2, 0, 0, 0)
 
 
 def test_transaction_source_round_trip(conn):

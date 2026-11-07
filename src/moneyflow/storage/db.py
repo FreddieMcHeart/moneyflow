@@ -3,6 +3,7 @@
 from collections.abc import Iterable
 from datetime import UTC, date
 from pathlib import Path
+from typing import NamedTuple
 
 import psycopg
 from alembic import command
@@ -13,6 +14,7 @@ from psycopg.types.json import Jsonb
 from moneyflow.core.model import Account, FxRate, Inputs, Ledger, LedgerEntry, Owner, Person, Rule, Ruling, Transaction
 
 _TABLES = ("owners", "accounts", "transactions", "rules", "rulings", "categories", "people")
+_TABLE_ORDER = ("owners", "accounts", "transactions", "rules", "rulings", "categories", "people", "fx_rates")
 _ALEMBIC_INI = Path(__file__).resolve().parents[3] / "alembic.ini"
 
 
@@ -130,9 +132,46 @@ def load_ledger(conn: psycopg.Connection) -> Ledger:
     return tuple(_entry(r) for r in _rows(conn, "select * from ledger_entries order by transaction_id, part"))
 
 
+class Counts(NamedTuple):
+    """What one import did to one table; `unchanged` is the incoming rows that needed no write."""
+
+    inserted: int
+    updated: int
+    deleted: int
+    unchanged: int
+
+
 def _insert_many(conn: psycopg.Connection, sql: str, rows: Iterable[tuple]) -> None:
     with conn.cursor() as cur:
         cur.executemany(sql, list(rows))
+
+
+def _upsert_changed(
+    conn: psycopg.Connection, table: str, columns: tuple[str, ...], rows: list[tuple]
+) -> tuple[set[str], set[str]]:
+    """Insert new rows by id, update only rows whose stored columns differ; return (inserted ids, updated ids).
+
+    `xmax = 0` in `returning` marks an insert; a row that is unchanged is not written and not returned.
+    """
+    rest = columns[1:]
+    sql = (
+        f"insert into {table} ({', '.join(columns)}) values ({', '.join(['%s'] * len(columns))})"
+        f" on conflict ({columns[0]}) do update set {', '.join(f'{c}=excluded.{c}' for c in rest)}"
+        f" where ({', '.join(f'{table}.{c}' for c in rest)}) is distinct from ({', '.join(f'excluded.{c}' for c in rest)})"
+        f" returning {columns[0]} as id, (xmax = 0) as inserted"
+    )
+    inserted: set[str] = set()
+    updated: set[str] = set()
+    if not rows:
+        return inserted, updated
+    with conn.cursor() as cur:
+        cur.executemany(sql, rows, returning=True)  # type: ignore[arg-type]
+        while True:
+            for r in cur.fetchall():
+                (inserted if r["inserted"] else updated).add(r["id"])  # type: ignore[index]
+            if not cur.nextset():
+                break
+    return inserted, updated
 
 
 def _upsert_facts(
@@ -140,38 +179,41 @@ def _upsert_facts(
     owners: Iterable[Owner],
     accounts: Iterable[Account],
     transactions: Iterable[Transaction],
-) -> None:
+) -> dict[str, Counts]:
     owners = tuple(owners)
-    # Demote first so a changed budget owner never trips the one-budget-owner index mid-upsert.
-    conn.execute("update owners set budget = false")
-    _insert_many(
-        conn,
-        "insert into owners (id, display, counterparty_strings, budget) values (%s,%s,%s,%s)"
-        " on conflict (id) do update set display=excluded.display,"
-        " counterparty_strings=excluded.counterparty_strings, budget=excluded.budget",
-        ((o.id, o.display, list(o.counterparty_strings), o.budget) for o in owners),
+    # Demote first so a changed budget owner never trips the one-budget-owner index mid-upsert; only
+    # owners that lose the flag are written.
+    keep = [o.id for o in owners if o.budget]
+    demoted = {
+        r["id"]
+        for r in conn.execute(
+            "update owners set budget = false where budget and id <> all(%s) returning id", (keep,)
+        ).fetchall()
+    }
+    owner_rows = [(o.id, o.display, list(o.counterparty_strings), o.budget) for o in owners]
+    account_rows = [
+        (a.id, a.name, a.currency, a.owner, a.role, a.include, a.cash_from, a.fx_income_floor_step, a.cash_opening)
+        for a in accounts
+    ]
+    tx_rows = [
+        (t.id, t.account_id, t.date, t.time, t.amount, t.currency, t.direction, t.mcc, t.description, t.comment,
+         t.source)
+        for t in transactions
+    ]
+    out: dict[str, Counts] = {}
+    specs = (
+        ("owners", ("id", "display", "counterparty_strings", "budget"), owner_rows),
+        ("accounts", ("id", "name", "currency", "owner", "role", "include", "cash_from", "fx_income_floor_step",
+                      "cash_opening"), account_rows),
+        ("transactions", ("id", "account_id", "date", "time", "amount", "currency", "direction", "mcc",
+                          "description", "comment", "source"), tx_rows),
     )
-    _insert_many(
-        conn,
-        "insert into accounts (id, name, currency, owner, role, include, cash_from, fx_income_floor_step,"
-        " cash_opening) values (%s,%s,%s,%s,%s,%s,%s,%s,%s)"
-        " on conflict (id) do update set name=excluded.name, currency=excluded.currency,"
-        " owner=excluded.owner, role=excluded.role, include=excluded.include, cash_from=excluded.cash_from,"
-        " fx_income_floor_step=excluded.fx_income_floor_step, cash_opening=excluded.cash_opening",
-        ((a.id, a.name, a.currency, a.owner, a.role, a.include, a.cash_from, a.fx_income_floor_step,
-          a.cash_opening) for a in accounts),
-    )
-    _insert_many(
-        conn,
-        "insert into transactions (id, account_id, date, time, amount, currency, direction, mcc,"
-        " description, comment, source) values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)"
-        " on conflict (id) do update set account_id=excluded.account_id, date=excluded.date,"
-        " time=excluded.time, amount=excluded.amount, currency=excluded.currency,"
-        " direction=excluded.direction, mcc=excluded.mcc, description=excluded.description,"
-        " comment=excluded.comment, source=excluded.source",
-        ((t.id, t.account_id, t.date, t.time, t.amount, t.currency, t.direction, t.mcc,
-          t.description, t.comment, t.source) for t in transactions),
-    )
+    for table, columns, rows in specs:
+        inserted, updated = _upsert_changed(conn, table, columns, rows)
+        if table == "owners":
+            updated |= demoted - inserted
+        out[table] = Counts(len(inserted), len(updated), 0, len(rows) - len(inserted) - len(updated))
+    return out
 
 
 class ImportCollision(Exception):
@@ -195,6 +237,54 @@ def _refuse_operator_collision(conn: psycopg.Connection, rulings: tuple[Ruling, 
             raise ImportCollision(g.id)
 
 
+def _sync_owned(
+    conn: psycopg.Connection,
+    table: str,
+    columns: tuple[str, ...],
+    incoming: dict[str, tuple],
+    *,
+    scope: str = "true",
+    scope_params: tuple = (),
+    constant: tuple[str, str] | None = None,
+    jsonb: frozenset[str] = frozenset(),
+) -> Counts:
+    """Make the rows in `scope` equal `incoming` by id: delete missing, update changed, insert new.
+
+    Only rows inside `scope` are ever read, updated or deleted, so rows of other owners are untouched.
+    `constant` is a (column, sql literal) written on insert and never compared (`created_by`).
+    """
+    key = columns[0]
+    rest = columns[1:]
+    existing = {
+        r[key]: tuple(r[c] for c in columns)
+        for r in conn.execute(
+            f"select {', '.join(columns)} from {table} where {scope}", scope_params  # type: ignore[arg-type]
+        ).fetchall()
+    }
+    gone = [k for k in existing if k not in incoming]
+    new = [v for k, v in incoming.items() if k not in existing]
+    changed = [v for k, v in incoming.items() if k in existing and existing[k] != v]
+
+    def wrap(values: tuple) -> tuple:
+        return tuple(Jsonb(v) if c in jsonb else v for c, v in zip(columns, values, strict=True))
+
+    if gone:
+        conn.execute(f"delete from {table} where {key} = any(%s) and {scope}", (gone, *scope_params))  # type: ignore[arg-type]
+    if changed and rest:
+        _insert_many(
+            conn,
+            f"update {table} set {', '.join(f'{c}=%s' for c in rest)} where {key}=%s and {scope}",  # type: ignore[arg-type]
+            ((*wrap(v)[1:], v[0], *scope_params) for v in changed),
+        )
+    if new:
+        cols = columns + ((constant[0],) if constant else ())
+        marks = ", ".join(["%s"] * len(columns)) + (f", {constant[1]}" if constant else "")
+        _insert_many(
+            conn, f"insert into {table} ({', '.join(cols)}) values ({marks})", (wrap(v) for v in new)  # type: ignore[arg-type]
+        )
+    return Counts(len(new), len(changed), len(gone), len(incoming) - len(new) - len(changed))
+
+
 def _replace_decisions(
     conn: psycopg.Connection,
     rules: Iterable[Rule],
@@ -202,47 +292,38 @@ def _replace_decisions(
     categories: Iterable[str],
     people: Iterable[Person],
     transaction_ids: list[str],
-) -> None:
+) -> dict[str, Counts]:
     rulings = tuple(rulings)
     _refuse_operator_collision(conn, rulings)
-    # An import ruling on a transaction missing from the source (stale) is kept: it is still that
-    # transaction's decision. Rules, categories and people are replaced whole, as before.
-    conn.execute(
-        "delete from rulings where created_by = 'import' and transaction_id = any(%s)", (transaction_ids,)
-    )
-    for table in ("rules", "categories"):
-        conn.execute(f"delete from {table} where created_by = 'import'")  # type: ignore[arg-type]
-    conn.execute("delete from people")  # people have no operator rows yet; replaced whole
-    _insert_many(
-        conn,
-        "insert into categories (name, created_by) values (%s, 'import')",
-        ((c,) for c in categories),
-    )
-    _insert_many(
-        conn,
-        "insert into people (id, display, opening_balance, note) values (%s,%s,%s,%s)",
-        ((p.id, p.display, p.opening_balance, p.note) for p in people),
-    )
-    _insert_many(
-        conn,
-        "insert into rules (id, kind, priority, ordinal, match, result, active, created_by)"
-        " values (%s,%s,%s,%s,%s,%s,%s,'import')",
-        ((r.id, r.kind, r.priority, r.ordinal, Jsonb(dict(r.match)), Jsonb(dict(r.result)), r.active)
-         for r in rules),
-    )
-    _insert_many(
-        conn,
-        "insert into rulings (id, transaction_id, kind, payload, created_by) values (%s,%s,%s,%s,'import')",
-        ((g.id, g.transaction_id, g.kind, Jsonb(dict(g.payload))) for g in rulings),
-    )
+    # Import-owned rows only are compared: an operator or agent row is never updated or deleted. An import
+    # ruling on a transaction missing from the source (stale) is outside the scope and kept: it is still
+    # that transaction's decision. People have no operator rows yet and are synced whole.
+    owned = "created_by = 'import'"
+    by = ("created_by", "'import'")
+    return {
+        "categories": _sync_owned(conn, "categories", ("name",), {c: (c,) for c in categories}, scope=owned, constant=by),
+        "people": _sync_owned(
+            conn, "people", ("id", "display", "opening_balance", "note"),
+            {p.id: (p.id, p.display, p.opening_balance, p.note) for p in people},
+        ),
+        "rules": _sync_owned(
+            conn, "rules", ("id", "kind", "priority", "ordinal", "match", "result", "active"),
+            {r.id: (r.id, r.kind, r.priority, r.ordinal, dict(r.match), dict(r.result), r.active) for r in rules},
+            scope=owned, constant=by, jsonb=frozenset({"match", "result"}),
+        ),
+        "rulings": _sync_owned(
+            conn, "rulings", ("id", "transaction_id", "kind", "payload"),
+            {g.id: (g.id, g.transaction_id, g.kind, dict(g.payload)) for g in rulings},
+            scope=f"{owned} and transaction_id = any(%s)", scope_params=(transaction_ids,),
+            constant=by, jsonb=frozenset({"payload"}),
+        ),
+    }
 
 
-def _replace_fx_rates(conn: psycopg.Connection, fx_rates: Iterable[FxRate]) -> None:
-    conn.execute("delete from fx_rates")
-    _insert_many(
-        conn,
-        "insert into fx_rates (id, date, rate, kind, method) values (%s,%s,%s,%s,%s)",
-        ((x.id, x.date, x.rate, x.kind, x.method) for x in fx_rates),
+def _replace_fx_rates(conn: psycopg.Connection, fx_rates: Iterable[FxRate]) -> Counts:
+    return _sync_owned(
+        conn, "fx_rates", ("id", "date", "rate", "kind", "method"),
+        {x.id: (x.id, x.date, x.rate, x.kind, x.method) for x in fx_rates},
     )
 
 
@@ -257,10 +338,12 @@ def replace_imported(
     categories: Iterable[str],
     people: Iterable[Person],
     fx_rates: Iterable[FxRate],
-) -> dict[str, int]:
-    """One transaction: upsert facts by id, replace the `import` decision rows, return counts per table.
+) -> dict[str, Counts]:
+    """One transaction: write only what changed, return (inserted, updated, deleted, unchanged) per table.
 
-    FX rates are replaced whole: the table holds only imported observations.
+    Facts are upserted by id with a change test; import-owned decision rows, people and FX rates are
+    compared by id against what is stored. A re-import of unchanged input writes nothing. Stored
+    transactions missing from the source are never deleted.
 
     An import ruling whose transaction is not among the incoming `transactions` survives the
     re-import. Such a ruling can name a category that a later `categories.yaml` drops; `categorize`
@@ -268,7 +351,7 @@ def replace_imported(
     """
     transactions = tuple(transactions)
     with conn.transaction():
-        _upsert_facts(conn, owners, accounts, transactions)
-        _replace_decisions(conn, rules, rulings, categories, people, [t.id for t in transactions])
-        _replace_fx_rates(conn, fx_rates)
-        return {t: _rows(conn, f"select count(*) as n from {t}")[0]["n"] for t in _TABLES}  # type: ignore[arg-type]
+        counts = _upsert_facts(conn, owners, accounts, transactions)
+        counts |= _replace_decisions(conn, rules, rulings, categories, people, [t.id for t in transactions])
+        counts["fx_rates"] = _replace_fx_rates(conn, fx_rates)
+        return {t: counts[t] for t in _TABLE_ORDER}
