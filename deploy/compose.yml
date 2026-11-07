@@ -31,6 +31,7 @@ services:
       MB_DB_PORT: "5432"
       MB_DB_DBNAME: metabase
       MB_DB_USER: metabase
+      JAVA_OPTS: -Xmx512m
       MB_DB_PASS: ${MB_DB_PASSWORD:?set MB_DB_PASSWORD in .env}
     ports:
       - "127.0.0.1:${MF_MB_PORT:-3000}:3000"

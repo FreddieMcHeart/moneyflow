@@ -13,7 +13,6 @@ from urllib.parse import quote, urlsplit
 import psycopg
 import pytest
 from psycopg import sql
-from psycopg.conninfo import conninfo_to_dict
 
 READER_SQL = Path(__file__).resolve().parents[2] / "deploy" / "postgres" / "reader.sql"
 PASSWORD = "throwaway-" + uuid.uuid4().hex  # random per run, role is dropped in `finally`
@@ -36,19 +35,27 @@ def _reader_url(db_url: str, reader: str) -> str:
 
 @pytest.fixture
 def reader_env(db_url):
-    """(admin connection, reader role name, reader URL) with reader.sql applied; the role is dropped in `finally`."""
+    """(admin connection, reader role name, reader URL) on a throwaway database that reader.sql is applied to.
+
+    moneyflow_test-style databases never get reader.sql: the database is created with the schema, then dropped
+    (with its role) in `finally`.
+    """
     from moneyflow.storage import db
 
-    reader = f"mf_reader_t{os.getpid()}_{uuid.uuid4().hex[:8]}"
-    dbname = str(conninfo_to_dict(db_url)["dbname"])
-    with db.connect(db_url) as admin:
-        admin.execute(sql.SQL("create role {} login password {}").format(sql.Identifier(reader), sql.Literal(PASSWORD)))
+    suffix = f"t{os.getpid()}_{uuid.uuid4().hex[:8]}"
+    dbname, reader = f"mf_readerenv_{suffix}", f"mf_reader_{suffix}"
+    url = _with_db(db_url, dbname)
+    with db.connect(db_url) as server:
+        server.execute(sql.SQL("create role {} login password {}").format(sql.Identifier(reader), sql.Literal(PASSWORD)))
         try:
-            _apply(admin, reader, dbname)
-            yield admin, reader, _reader_url(db_url, reader)
+            server.execute(sql.SQL("create database {}").format(sql.Identifier(dbname)))
+            db.migrate(url)
+            with db.connect(url) as admin:
+                _apply(admin, reader, dbname)
+                yield admin, reader, _reader_url(url, reader)
         finally:
-            admin.execute(sql.SQL("drop owned by {}").format(sql.Identifier(reader)))
-            admin.execute(sql.SQL("drop role {}").format(sql.Identifier(reader)))
+            server.execute(sql.SQL("drop database if exists {} with (force)").format(sql.Identifier(dbname)))
+            server.execute(sql.SQL("drop role {}").format(sql.Identifier(reader)))
 
 
 @pytest.fixture
@@ -132,3 +139,14 @@ def test_reader_cannot_create_temp_tables(throwaway_db):
     with psycopg.connect(_as(db_url, name, reader), autocommit=True) as conn:
         with pytest.raises(psycopg.errors.InsufficientPrivilege):
             conn.execute("create temp table reader_temp (x int)")
+
+
+def test_reader_sql_is_not_applied_to_the_shared_test_database(reader_env, db_url):
+    """The fixture works on a throwaway database; the per-process test database never sees the reader role."""
+    admin, reader, _ = reader_env
+    current = admin.execute("select current_database() as d").fetchone()["d"]
+    assert current != urlsplit(db_url).path.lstrip("/")
+    from moneyflow.storage import db
+
+    with db.connect(db_url) as other:
+        assert other.execute("select has_table_privilege(%s, 'accounts', 'SELECT') as ok", (reader,)).fetchone()["ok"] is False

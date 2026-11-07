@@ -46,7 +46,7 @@ cp .env.example .env     # optional: `./local.sh up` creates .env with random pa
 ./local.sh up
 ```
 
-1. In `.env`, set `MF_OLD_REPO` to the path of the old repo (it is only read, never copied or changed). `up` refuses while it is unset.
+1. In `.env`, set `MF_OLD_REPO` to the path of the old repo (it is only read, never copied or changed). local.sh refuses to run without it.
 2. `./local.sh up` starts the containers, migrates, imports and rebuilds, and provisions Metabase. Run it again at any time: the import is incremental and prints inserted / updated / deleted / unchanged counts per table.
 
 | Command | What it does |
@@ -62,7 +62,8 @@ cp .env.example .env     # optional: `./local.sh up` creates .env with random pa
 - **Reset.** There is no reset command: `./local.sh stop`, then delete `.local/` by hand. The next `./local.sh up` recreates the bind directories under `.local/` before it starts the containers.
 - **Passwords.** `up` refuses to start while a password in `.env` is empty or still `change-me`; the message names the key only. Both ports are published on `127.0.0.1` only.
 - **Runtimes.** The local environment was tested on podman only, not on Docker Desktop.
-- **Memory.** Measured: postgres uses about 90 MB and metabase about 1 GB, so the VM needs about 2 GB free.
+- **Memory.** Metabase's JVM heap is capped at 512 MB (JAVA_OPTS=-Xmx512m in deploy/compose.yml); the measured numbers are below.
+- **OOM check.** On podman, run `podman machine ssh` then `dmesg | grep -i 'killed process'`; any line means the VM killed a process for memory.
 - **podman without a socket file.** If the host has no podman API socket file, compose can reach the machine's socket over ssh: forward the machine's `/run/podman/podman.sock` to a local unix socket with `ssh -L`, and point `DOCKER_HOST` at that local socket.
 
 ### Which Postgres
@@ -83,7 +84,7 @@ Metabase is released under the AGPL. This repo only references the image `metaba
 The MCP server is read-only and talks to the local database. Take `POSTGRES_PASSWORD` from `.env`:
 
 ```
-claude mcp add moneyflow -- uv run --directory /path/to/moneyflow python -m moneyflow mcp --db postgresql://postgres:<POSTGRES_PASSWORD>@localhost:5434/moneyflow_dev
+claude mcp add moneyflow -- uv run --directory /path/to/moneyflow python -m moneyflow mcp --db postgresql://mf_reader:<MF_READER_PASSWORD>@localhost:5434/moneyflow_dev
 ```
 
 Everything after `--` is the server command. Use `-s user` or `-s project` before the name to change the scope (default `local`).

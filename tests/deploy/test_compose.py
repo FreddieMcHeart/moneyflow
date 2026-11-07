@@ -59,3 +59,10 @@ def test_published_ports_are_bound_to_loopback_only():
     for name, service in _compose()["services"].items():
         for port in service.get("ports", []):
             assert port.startswith("127.0.0.1:"), (name, port)
+
+
+def test_metabase_heap_is_capped():
+    env = _compose()["services"]["metabase"]["environment"]
+    if isinstance(env, list):
+        env = dict(item.split("=", 1) for item in env)
+    assert "-Xmx512m" in str(env.get("JAVA_OPTS", ""))
