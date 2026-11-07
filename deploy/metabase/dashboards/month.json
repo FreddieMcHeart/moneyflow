@@ -10,7 +10,7 @@
     },
     {
       "name": "Spent per category (UAH)",
-      "sql": "select coalesce(category, 'uncategorized') as category, sum(amount_uah) as amount_uah from ledger_entries where status = 'kept' and budget_month is not null [[and budget_month = {{budget_month}}]] group by category order by amount_uah",
+      "sql": "select coalesce(category, 'Uncategorized') as category, sum(amount_uah) as amount_uah from ledger_entries where direction <> 'income' and status in ('kept', 'unresolved') and budget_month is not null [[and budget_month = {{budget_month}}]] group by category order by amount_uah",
       "display": "bar",
       "visualization_settings": {"graph.dimensions": ["category"], "graph.metrics": ["amount_uah"]},
       "row": 4, "col": 0, "size_x": 24, "size_y": 8
