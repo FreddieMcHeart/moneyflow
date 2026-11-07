@@ -86,3 +86,49 @@ def test_reader_can_select_a_table_created_later(reader_env, reader_conn):
 def test_reader_cannot_write(reader_conn, statement):
     with pytest.raises(psycopg.errors.InsufficientPrivilege):
         reader_conn.execute(statement)
+
+
+@pytest.fixture
+def throwaway_db(db_url):
+    """An empty database that reader.sql is applied to, plus a second role that was granted nothing."""
+    from moneyflow.storage import db
+
+    suffix = f"t{os.getpid()}_{uuid.uuid4().hex[:8]}"
+    name, reader, other = f"mf_throwaway_{suffix}", f"mf_reader_{suffix}", f"mf_other_{suffix}"
+    with db.connect(db_url) as admin:
+        for role in (reader, other):
+            admin.execute(sql.SQL("create role {} login password {}").format(sql.Identifier(role), sql.Literal(PASSWORD)))
+        try:
+            admin.execute(sql.SQL("create database {}").format(sql.Identifier(name)))
+            with db.connect(_with_db(db_url, name)) as inside:
+                _apply(inside, reader, name)
+            yield db_url, name, reader, other
+        finally:
+            # The database goes first: its ACL entries are what keep the roles from being dropped.
+            admin.execute(sql.SQL("drop database if exists {}").format(sql.Identifier(name)))
+            for role in (reader, other):
+                admin.execute(sql.SQL("drop role {}").format(sql.Identifier(role)))
+
+
+def _with_db(db_url: str, name: str) -> str:
+    return urlsplit(db_url)._replace(path="/" + name).geturl()
+
+
+def _as(db_url: str, name: str, role: str) -> str:
+    return _reader_url(_with_db(db_url, name), role)
+
+
+def test_role_without_a_grant_cannot_connect(throwaway_db):
+    """reader.sql revokes CONNECT from PUBLIC: only roles granted it explicitly get in."""
+    db_url, name, reader, other = throwaway_db
+    with psycopg.connect(_as(db_url, name, reader)) as ok:
+        ok.execute("select 1")
+    with pytest.raises(psycopg.OperationalError, match="permission denied for database"):
+        psycopg.connect(_as(db_url, name, other))
+
+
+def test_reader_cannot_create_temp_tables(throwaway_db):
+    db_url, name, reader, _ = throwaway_db
+    with psycopg.connect(_as(db_url, name, reader), autocommit=True) as conn:
+        with pytest.raises(psycopg.errors.InsufficientPrivilege):
+            conn.execute("create temp table reader_temp (x int)")

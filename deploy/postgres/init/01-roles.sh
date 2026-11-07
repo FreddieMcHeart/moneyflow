@@ -7,6 +7,8 @@ psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" \
   -v mb_password="$MB_DB_PASSWORD" -v reader_password="$MF_READER_PASSWORD" <<'SQL'
 CREATE ROLE metabase LOGIN PASSWORD :'mb_password';
 CREATE DATABASE metabase OWNER metabase;
+REVOKE CONNECT, TEMPORARY ON DATABASE metabase FROM PUBLIC;
+GRANT CONNECT, TEMPORARY ON DATABASE metabase TO metabase, postgres;
 CREATE ROLE mf_reader LOGIN PASSWORD :'reader_password';
 SQL
 
