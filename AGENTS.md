@@ -19,7 +19,9 @@ The ub tools are read from `UB_TOOLS` (default `~/dev/ub-tools`) and are not par
 ## Local Postgres
 
 DB tests need a real Postgres. They fail (never skip) when `MONEYFLOW_TEST_DATABASE_URL` is unset,
-and they refuse a database whose name has no `test` (the fixture drops schema `public`).
+and they refuse a database whose name does not end in `_test`. The value must be a `postgresql://` URL,
+not a keyword DSN. Each pytest process creates its own `<name>_<pid>_test` copy and drops it at the end;
+copies left by a killed worker are dropped at the next session start.
 
 ```
 docker run -d --name mf-pg -e POSTGRES_PASSWORD=mf -p 5433:5432 postgres:16
