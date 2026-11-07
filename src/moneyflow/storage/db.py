@@ -258,6 +258,58 @@ def _refuse_operator_collision(conn: psycopg.Connection, rulings: tuple[Ruling, 
             raise ImportCollision(g.id)
 
 
+def _wrap_jsonb(columns: tuple[str, ...], values: tuple, jsonb: frozenset[str]) -> tuple:
+    return tuple(Jsonb(v) if c in jsonb else v for c, v in zip(columns, values, strict=True))
+
+
+def _read_scope(
+    conn: psycopg.Connection, table: str, columns: tuple[str, ...], scope: str, scope_params: tuple
+) -> dict[str, tuple]:
+    key = columns[0]
+    rows = conn.execute(
+        f"select {', '.join(columns)} from {table} where {scope}", scope_params  # type: ignore[arg-type]
+    ).fetchall()
+    return {r[key]: tuple(r[c] for c in columns) for r in rows}
+
+
+def _update_rows(
+    conn: psycopg.Connection,
+    table: str,
+    columns: tuple[str, ...],
+    changed: list[tuple],
+    scope: str,
+    scope_params: tuple,
+    jsonb: frozenset[str],
+) -> None:
+    rest = columns[1:]
+    if not (changed and rest):
+        return
+    _insert_many(
+        conn,
+        f"update {table} set {', '.join(f'{c}=%s' for c in rest)} where {columns[0]}=%s and {scope}",  # type: ignore[arg-type]
+        ((*_wrap_jsonb(columns, v, jsonb)[1:], v[0], *scope_params) for v in changed),
+    )
+
+
+def _insert_rows(
+    conn: psycopg.Connection,
+    table: str,
+    columns: tuple[str, ...],
+    new: list[tuple],
+    constant: tuple[str, str] | None,
+    jsonb: frozenset[str],
+) -> None:
+    if not new:
+        return
+    cols = columns + ((constant[0],) if constant else ())
+    marks = ", ".join(["%s"] * len(columns)) + (f", {constant[1]}" if constant else "")
+    _insert_many(
+        conn,
+        f"insert into {table} ({', '.join(cols)}) values ({marks})",  # type: ignore[arg-type]
+        (_wrap_jsonb(columns, v, jsonb) for v in new),
+    )
+
+
 def _sync_owned(
     conn: psycopg.Connection,
     table: str,
@@ -275,34 +327,14 @@ def _sync_owned(
     `constant` is a (column, sql literal) written on insert and never compared (`created_by`).
     """
     key = columns[0]
-    rest = columns[1:]
-    existing = {
-        r[key]: tuple(r[c] for c in columns)
-        for r in conn.execute(
-            f"select {', '.join(columns)} from {table} where {scope}", scope_params  # type: ignore[arg-type]
-        ).fetchall()
-    }
+    existing = _read_scope(conn, table, columns, scope, scope_params)
     gone = [k for k in existing if k not in incoming]
     new = [v for k, v in incoming.items() if k not in existing]
     changed = [v for k, v in incoming.items() if k in existing and existing[k] != v]
-
-    def wrap(values: tuple) -> tuple:
-        return tuple(Jsonb(v) if c in jsonb else v for c, v in zip(columns, values, strict=True))
-
     if gone:
         conn.execute(f"delete from {table} where {key} = any(%s) and {scope}", (gone, *scope_params))  # type: ignore[arg-type]
-    if changed and rest:
-        _insert_many(
-            conn,
-            f"update {table} set {', '.join(f'{c}=%s' for c in rest)} where {key}=%s and {scope}",  # type: ignore[arg-type]
-            ((*wrap(v)[1:], v[0], *scope_params) for v in changed),
-        )
-    if new:
-        cols = columns + ((constant[0],) if constant else ())
-        marks = ", ".join(["%s"] * len(columns)) + (f", {constant[1]}" if constant else "")
-        _insert_many(
-            conn, f"insert into {table} ({', '.join(cols)}) values ({marks})", (wrap(v) for v in new)  # type: ignore[arg-type]
-        )
+    _update_rows(conn, table, columns, changed, scope, scope_params, jsonb)
+    _insert_rows(conn, table, columns, new, constant, jsonb)
     return Counts(len(new), len(changed), len(gone), len(incoming) - len(new) - len(changed))
 
 
