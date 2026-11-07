@@ -70,3 +70,12 @@ def test_metabase_heap_is_capped():
         "-Xmx384m", "-XX:+UseSerialGC", "-XX:ReservedCodeCacheSize=64m",
         "-Xss512k", "-XX:TieredStopAtLevel=1",
     ]
+
+
+def test_postgres_healthcheck_probes_over_tcp():
+    # The image's temporary init server listens only on the unix socket, so a TCP
+    # probe cannot pass before the init scripts (roles, metabase DB) finish.
+    test = _compose()["services"]["postgres"]["healthcheck"]["test"]
+    command = test if isinstance(test, str) else " ".join(test)
+    assert "pg_isready" in command
+    assert "-h 127.0.0.1" in command
