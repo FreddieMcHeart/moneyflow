@@ -31,7 +31,7 @@ def _seed(conn):
         _entry("t1", "Cafe", "Coffee", "-10.50", day=2), _entry("t2", "Transport", None, "-3.00", day=3),
         _entry("t3", "Cafe", None, "-4.25", day=4), _entry("t4", "Cafe", "Coffee", "-1.00", "USD", day=5, account_id="acc_usd"),
     )
-    db.save_ledger(conn, ledger)
+    db.save_ledger(conn, ledger, summaries=(), built_for=date(2026, 1, 1))
     return ledger
 
 
@@ -85,7 +85,7 @@ def _seed_cycle(conn):
                       "rule:r", "income", None, "2026-01", None, None, None)
     spend = LedgerEntry("t2", 0, date(2026, 1, 5), "acc1", "Cafe", None, Decimal("-40.00"), "UAH", "kept", None,
                         "rule:r", "expense", None, "2026-01", None, None, None)
-    db.save_ledger(conn, (pay, spend))
+    db.save_ledger(conn, (pay, spend), summaries=(), built_for=date(2026, 1, 1))
 
 
 def test_month_summary_open_cycle_and_named_month(conn):

@@ -35,6 +35,62 @@ uv run python -m moneyflow rebuild --db "$MONEYFLOW_DATABASE_URL"
 uv run python -m moneyflow mcp --db "$MONEYFLOW_DATABASE_URL"
 ```
 
+## Local environment
+
+A Postgres and a Metabase in containers, filled from the old repo, with three dashboards. Everything it stores lives under `.local/` (gitignored).
+
+Prerequisites: `docker` (or `podman`; set `MF_COMPOSE="podman compose"`) and [uv](https://docs.astral.sh/uv/).
+
+```
+cp .env.example .env     # optional: `./local.sh up` creates .env with random passwords if it is missing
+./local.sh up
+```
+
+1. In `.env`, set `MF_OLD_REPO` to the path of the old repo (it is only read, never copied or changed). local.sh refuses to run without it.
+2. `./local.sh up` starts the containers, migrates, imports and rebuilds, and provisions Metabase. Run it again at any time: the import is incremental and prints inserted / updated / deleted / unchanged counts per table.
+
+| Command | What it does |
+|---|---|
+| `./local.sh up` | start everything, migrate, import, rebuild, provision Metabase |
+| `./local.sh refresh` | import and rebuild only (containers must be running) |
+| `./local.sh status` | containers, schema revision, row counts, Metabase health |
+| `./local.sh stop` | stop the containers; data stays in `.local/` |
+
+- **URLs.** Postgres on `localhost:5434` (database `moneyflow_dev`), Metabase on `http://localhost:3000`. Both ports are set in `.env` (`MF_PG_PORT`, `MF_MB_PORT`).
+- **Metabase first login.** Use `MB_ADMIN_EMAIL` and `MB_ADMIN_PASSWORD` from `.env`.
+- **Dashboards.** The JSON definitions are in `deploy/metabase/dashboards/` (Month, Categories by cycle, Transactions). They are native SQL, upserted by name into the collection "MoneyFlow (provisioned)". Edits made in the Metabase UI inside that collection are overwritten by the next `up`; change the JSON instead.
+- **Reset.** There is no reset command: `./local.sh stop`, then delete `.local/` by hand. The next `./local.sh up` recreates the bind directories under `.local/` before it starts the containers.
+- **Passwords.** `up` refuses to start while a password in `.env` is empty or still `change-me`; the message names the key only. Both ports are published on `127.0.0.1` only.
+- **Runtimes.** The local environment was tested on podman only, not on Docker Desktop.
+- **Memory.** Metabase runs with JAVA_OPTS="-Xmx384m -XX:+UseSerialGC -XX:ReservedCodeCacheSize=64m -Xss512k -XX:TieredStopAtLevel=1" in deploy/compose.yml; the measured numbers are below.
+- **Podman VM.** The podman VM needs 4 GB: podman machine set --memory 4096 (the machine must be stopped first).
+- **Podman VM memory, measured.** Measured 2026-11-07 on a 4 GB podman VM (3.9 GB usable): peak Metabase java RSS about 900 MB during provisioning, VM used about 1.5 GB of 3.9 GB after up.
+- **OOM check.** On podman, run `podman machine ssh` then `dmesg | grep -i 'killed process'`; any line means the VM killed a process for memory.
+- **podman without a socket file.** If the host has no podman API socket file, compose can reach the machine's socket over ssh: forward the machine's `/run/podman/podman.sock` to a local unix socket with `ssh -L`, and point `DOCKER_HOST` at that local socket.
+
+### Which Postgres
+
+| Postgres | Port | Databases | Used for |
+|---|---|---|---|
+| `mf-pg` (the `docker run` in [AGENTS.md](AGENTS.md)) | 5433 | `moneyflow_test` | the test suite only |
+| local environment (`./local.sh up`) | 5434 | `moneyflow_dev`, `metabase` | development data and Metabase |
+
+Tests never use `moneyflow_dev`. `mf-pg` stays as it is; nothing here deletes it. The Quick start above uses `mf-pg` for a throwaway dev database; with the local environment, point `MONEYFLOW_DATABASE_URL` at port 5434 instead.
+
+### Metabase licence
+
+Metabase is released under the AGPL. This repo only references the image `metabase/metabase` by tag in `deploy/compose.yml`; the image is not shipped or copied here, and this repo stays MIT.
+
+## Use from Claude Code
+
+The MCP server is read-only and talks to the local database. Take `MF_READER_PASSWORD` from `.env`:
+
+```
+claude mcp add moneyflow -- uv run --directory /path/to/moneyflow python -m moneyflow mcp --db postgresql://mf_reader:<MF_READER_PASSWORD>@localhost:5434/moneyflow_dev
+```
+
+Everything after `--` is the server command. Use `-s user` or `-s project` before the name to change the scope (default `local`).
+
 ## Tests and quality gates
 
 ```

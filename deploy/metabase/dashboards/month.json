@@ -1,0 +1,19 @@
+{
+  "name": "Month",
+  "cards": [
+    {
+      "name": "Month summary",
+      "sql": "select budget_month, currency, income, total_actual, cycle_start, cycle_end, cycle_open, days_left, cash_in_hand from month_summaries [[where budget_month = {{budget_month}}]] order by budget_month desc, currency",
+      "display": "table",
+      "visualization_settings": {},
+      "row": 0, "col": 0, "size_x": 24, "size_y": 4
+    },
+    {
+      "name": "Spent per category (UAH)",
+      "sql": "select coalesce(category, 'Uncategorized') as category, sum(amount_uah) as amount_uah from ledger_entries where direction <> 'income' and status in ('kept', 'unresolved') and budget_month is not null [[and budget_month = {{budget_month}}]] group by category order by amount_uah",
+      "display": "bar",
+      "visualization_settings": {"graph.dimensions": ["category"], "graph.metrics": ["amount_uah"]},
+      "row": 4, "col": 0, "size_x": 24, "size_y": 8
+    }
+  ]
+}

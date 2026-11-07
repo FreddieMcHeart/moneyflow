@@ -96,8 +96,8 @@ def run(old_repo: Path, conn: psycopg.Connection) -> dict[str, int]:
         people=read_people(manual),
         fx_rates=read_fx_rates(data / "history" / "usd_rate.csv"),
     )
-    for table, n in counts.items():
-        print(f"{table}: {n}")
+    for table, c in counts.items():
+        print(f"{table}: {c.inserted} inserted, {c.updated} updated, {c.deleted} deleted, {c.unchanged} unchanged")
     print(f"imported exclude rules: {len(exclude_rules)}")
     print(f"imported reclassify rules: {len(reclassify_rules)}")
     for kind, group in groups[1:]:
