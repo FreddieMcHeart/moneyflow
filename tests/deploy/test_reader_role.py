@@ -58,7 +58,8 @@ def reader_conn(reader_env):
 
 
 def test_reader_can_select_app_tables(reader_conn):
-    assert reader_conn.execute("select count(*) from accounts").fetchone()[0] >= 0
+    # The query must run; the row count is irrelevant (an empty table is fine).
+    reader_conn.execute("select count(*) from accounts").fetchone()
 
 
 def test_reader_can_select_a_table_created_later(reader_env, reader_conn):
