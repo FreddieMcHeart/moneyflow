@@ -1,0 +1,12 @@
+{
+  "name": "Transactions",
+  "cards": [
+    {
+      "name": "Ledger entries",
+      "sql": "select date, budget_month, account_id, category, subcategory, amount, currency, amount_uah, status, transaction_id, part from ledger_entries where true [[and budget_month = {{budget_month}}]] [[and category = {{category}}]] order by date desc, transaction_id, part",
+      "display": "table",
+      "visualization_settings": {},
+      "row": 0, "col": 0, "size_x": 24, "size_y": 14
+    }
+  ]
+}
