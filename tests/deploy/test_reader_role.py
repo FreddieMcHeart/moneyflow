@@ -35,7 +35,8 @@ def _reader_url(db_url: str, reader: str) -> str:
 
 
 @pytest.fixture
-def reader_conn(db_url):
+def reader_env(db_url):
+    """(admin connection, reader role name, reader URL) with reader.sql applied; the role is dropped in `finally`."""
     from moneyflow.storage import db
 
     reader = f"mf_reader_t{os.getpid()}_{uuid.uuid4().hex[:8]}"
@@ -44,15 +45,31 @@ def reader_conn(db_url):
         admin.execute(sql.SQL("create role {} login password {}").format(sql.Identifier(reader), sql.Literal(PASSWORD)))
         try:
             _apply(admin, reader, dbname)
-            with psycopg.connect(_reader_url(db_url, reader), autocommit=True) as conn:
-                yield conn
+            yield admin, reader, _reader_url(db_url, reader)
         finally:
             admin.execute(sql.SQL("drop owned by {}").format(sql.Identifier(reader)))
             admin.execute(sql.SQL("drop role {}").format(sql.Identifier(reader)))
 
 
+@pytest.fixture
+def reader_conn(reader_env):
+    with psycopg.connect(reader_env[2], autocommit=True) as conn:
+        yield conn
+
+
 def test_reader_can_select_app_tables(reader_conn):
     assert reader_conn.execute("select count(*) from accounts").fetchone()[0] >= 0
+
+
+def test_reader_can_select_a_table_created_later(reader_env, reader_conn):
+    """ALTER DEFAULT PRIVILEGES: a table the admin creates after reader.sql ran is readable too."""
+    admin = reader_env[0]
+    table = f"later_t{os.getpid()}_{uuid.uuid4().hex[:8]}"
+    admin.execute(sql.SQL("create table {} (x int)").format(sql.Identifier(table)))
+    try:
+        reader_conn.execute(sql.SQL("select * from {}").format(sql.Identifier(table))).fetchall()
+    finally:
+        admin.execute(sql.SQL("drop table {}").format(sql.Identifier(table)))
 
 
 @pytest.mark.parametrize(
