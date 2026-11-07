@@ -67,6 +67,10 @@ class Counts:
     unchanged: int = 0
     log: list[str] = field(default_factory=list)
 
+    def record(self, kind: str, name: str, result: str) -> None:
+        setattr(self, result, getattr(self, result) + 1)
+        self.log.append(f"{kind} {name}: {result}")
+
     def line(self) -> str:
         return f"created {self.created}, updated {self.updated}, unchanged {self.unchanged}"
 
@@ -93,7 +97,7 @@ def _items(payload) -> list[dict]:
 def _ensure_database(client: Client, env: dict[str, str], counts: Counts) -> int:
     for db in _items(client.get("/api/database")):
         if db["name"] == DATABASE_NAME:
-            counts.unchanged += 1
+            counts.record("database", DATABASE_NAME, "unchanged")
             return db["id"]
     created = client.post("/api/database", {
         "name": DATABASE_NAME,
@@ -101,17 +105,17 @@ def _ensure_database(client: Client, env: dict[str, str], counts: Counts) -> int
         "details": {"host": "postgres", "port": 5432, "dbname": "moneyflow_dev", "user": READER_ROLE,
                     "password": env["MF_READER_PASSWORD"], "ssl": False},
     })
-    counts.created += 1
+    counts.record("database", DATABASE_NAME, "created")
     return created["id"]
 
 
 def _ensure_collection(client: Client, counts: Counts) -> int:
     for collection in _items(client.get("/api/collection")):
         if collection["name"] == COLLECTION_NAME and not collection.get("archived"):
-            counts.unchanged += 1
+            counts.record("collection", COLLECTION_NAME, "unchanged")
             return collection["id"]
     created = client.post("/api/collection", {"name": COLLECTION_NAME})
-    counts.created += 1
+    counts.record("collection", COLLECTION_NAME, "created")
     return created["id"]
 
 
@@ -139,12 +143,21 @@ def _card_body(card: dict, database_id: int, collection_id: int, parameters: lis
 
 
 def _tag_view(tags: dict | None) -> dict:
-    """Only what we set and Metabase keeps as is: it rewrites ids and display names and adds keys."""
+    """Only what we set and Metabase keeps as is: it rewrites ids and display names and adds keys.
+
+    Legacy cards store a dict keyed by name; v0.65 stores a list of tag objects, and no key when there are none."""
+    if isinstance(tags, list):
+        return {tag["name"]: tag.get("type") for tag in tags}
     return {name: tag.get("type") for name, tag in (tags or {}).items()}
 
 
 def _card_differs(existing: dict, wanted: dict) -> bool:
-    native = (existing.get("dataset_query") or {}).get("native") or {}
+    query = existing.get("dataset_query") or {}
+    if "stages" in query:  # v0.65 MBQL-lib shape: the stage holds the SQL string and the tags
+        stage = (query["stages"] or [{}])[0]
+        native = {"query": stage.get("native"), "template-tags": stage.get("template-tags")}
+    else:
+        native = query.get("native") or {}
     want_native = wanted["dataset_query"]["native"]
     stored_viz = existing.get("visualization_settings") or {}
     return (native.get("query") != want_native["query"]
@@ -159,13 +172,13 @@ def _upsert_card(client: Client, card: dict, database_id: int, collection_id: in
     current = existing.get(card["name"])
     if current is None:
         created = client.post("/api/card", wanted)
-        counts.created += 1
+        counts.record("card", card["name"], "created")
         return created["id"]
     if _card_differs(current, wanted):
         client.put(f"/api/card/{current['id']}", wanted)
-        counts.updated += 1
+        counts.record("card", card["name"], "updated")
     else:
-        counts.unchanged += 1
+        counts.record("card", card["name"], "unchanged")
     return current["id"]
 
 
@@ -184,14 +197,14 @@ def _upsert_dashboard(client: Client, definition: dict, card_ids: list[int], col
     if current is None:
         created = client.post("/api/dashboard", {"name": definition["name"], "collection_id": collection_id})
         client.put(f"/api/dashboard/{created['id']}", {"dashcards": dashcards})
-        counts.created += 1
+        counts.record("dashboard", definition["name"], "created")
         return
     stored = client.get(f"/api/dashboard/{current['id']}")
     if _layout(stored.get("dashcards") or []) != _layout(dashcards):
         client.put(f"/api/dashboard/{current['id']}", {"dashcards": dashcards})
-        counts.updated += 1
+        counts.record("dashboard", definition["name"], "updated")
     else:
-        counts.unchanged += 1
+        counts.record("dashboard", definition["name"], "unchanged")
 
 
 def load_definitions(directory: Path) -> list[dict]:

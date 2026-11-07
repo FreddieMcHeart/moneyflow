@@ -254,3 +254,71 @@ def test_second_provision_of_unchanged_json_updates_nothing_against_an_echoing_m
         assert provision(Client(fake.url), ENV, defs).updated == 1
     finally:
         fake.server.shutdown()
+
+
+class V065Metabase(FakeMetabase):
+    """Stores cards in the v0.65 MBQL-lib shape: stages[0].native is the SQL string, template-tags a list, absent when empty."""
+
+    def route(self, method, path, body):
+        result, code = super().route(method, path, body)
+        if path.startswith("/api/card") and method in ("POST", "PUT") and body:
+            native = body["dataset_query"]["native"]
+            stage = {"lib/type": "mbql.stage/native", "native": native["query"]}
+            if native.get("template-tags"):
+                stage["template-tags"] = [{"id": "server-" + k, "name": k, "display-name": k, "type": t["type"]}
+                                          for k, t in native["template-tags"].items()]
+            card = next(c for c in self.cards if c["id"] == result["id"])
+            card["dataset_query"] = {"lib/type": "mbql/query", "database": body["dataset_query"]["database"], "stages": [stage]}
+        return result, code
+
+
+def _tagged_defs(sql):
+    defs = json.loads(json.dumps(DEFS))
+    defs[0]["cards"][0]["sql"] = sql  # c1 has a tag, c2 and c3 have none
+    return defs
+
+
+def test_v065_stored_shape_is_unchanged_on_second_run_and_changed_sql_is_one_update():
+    fake = V065Metabase()
+    try:
+        defs = _tagged_defs("select 1 [[where a = {{a_var}}]]")
+        provision(Client(fake.url), ENV, defs)
+        assert isinstance(fake.cards[0]["dataset_query"]["stages"][0]["template-tags"], list)
+        assert "template-tags" not in fake.cards[1]["dataset_query"]["stages"][0]
+        before = len(fake.writes())
+        counts = provision(Client(fake.url), ENV, defs)
+        assert (counts.updated, len(fake.writes())) == (0, before)
+        defs[0]["cards"][0]["sql"] = "select 2 [[where a = {{a_var}}]]"
+        defs[0]["cards"][1]["sql"] = "select 22"
+        counts = provision(Client(fake.url), ENV, defs)
+        assert [e for e in counts.log if e.startswith("card ")] == ["card c1: updated", "card c2: updated", "card c3: unchanged"]
+    finally:
+        fake.server.shutdown()
+
+
+def test_legacy_stored_shape_stays_pinned(fake):
+    defs = _tagged_defs("select 1 [[where a = {{a_var}}]]")
+    provision(Client(fake.url), ENV, defs)
+    assert isinstance(fake.cards[0]["dataset_query"]["native"]["template-tags"], dict)
+    assert provision(Client(fake.url), ENV, defs).updated == 0
+    defs[0]["cards"][0]["sql"] = "select 9"
+    assert provision(Client(fake.url), ENV, defs).updated == 1
+
+
+def test_run_prints_one_line_per_object_before_the_totals(fake, tmp_path, capsys):
+    from tools.metabase import main
+
+    (tmp_path / "deploy" / "metabase" / "dashboards").mkdir(parents=True)
+    for i, d in enumerate(DEFS):
+        (tmp_path / "deploy" / "metabase" / "dashboards" / f"{i}.json").write_text(json.dumps(d))
+    port = fake.url.rsplit(":", 1)[1]
+    (tmp_path / ".env").write_text("".join(f"{k}={v}\n" for k, v in {**ENV, "MF_MB_PORT": port}.items()))
+    assert main(root=tmp_path) == 0
+    capsys.readouterr()
+    assert main(root=tmp_path) == 0
+    out = capsys.readouterr().out.splitlines()
+    assert out[:2] == ["metabase: database moneyflow: unchanged", f"metabase: collection {COLLECTION_NAME}: unchanged"]
+    for line in ("card c1: unchanged", "card c2: unchanged", "card c3: unchanged", "dashboard Dash A: unchanged", "dashboard Dash B: unchanged"):
+        assert "metabase: " + line in out
+    assert out[-1] == "metabase: created 0, updated 0, unchanged 7" and len(out) == 8
+    assert "secret" not in "".join(out)

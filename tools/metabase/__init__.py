@@ -18,5 +18,7 @@ def main(argv: Sequence[str] | None = None, *, root: Path = ROOT) -> int:
     except (ApiError, ValueError, KeyError) as error:
         print(f"metabase: failed ({type(error).__name__}: {str(error)[:120]})")
         return 1
+    for entry in counts.log:
+        print(f"metabase: {entry}")
     print(f"metabase: {counts.line()}")
     return 0

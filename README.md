@@ -64,6 +64,7 @@ cp .env.example .env     # optional: `./local.sh up` creates .env with random pa
 - **Runtimes.** The local environment was tested on podman only, not on Docker Desktop.
 - **Memory.** Metabase runs with JAVA_OPTS="-Xmx384m -XX:+UseSerialGC -XX:ReservedCodeCacheSize=64m -Xss512k -XX:TieredStopAtLevel=1" in deploy/compose.yml; the measured numbers are below.
 - **Podman VM.** The podman VM needs 4 GB: podman machine set --memory 4096 (the machine must be stopped first).
+- **Podman VM memory, measured.** Measured 2026-11-07 on a 4 GB podman VM (3.9 GB usable): peak Metabase java RSS about 900 MB during provisioning, VM used about 1.5 GB of 3.9 GB after up.
 - **OOM check.** On podman, run `podman machine ssh` then `dmesg | grep -i 'killed process'`; any line means the VM killed a process for memory.
 - **podman without a socket file.** If the host has no podman API socket file, compose can reach the machine's socket over ssh: forward the machine's `/run/podman/podman.sock` to a local unix socket with `ssh -L`, and point `DOCKER_HOST` at that local socket.
 
