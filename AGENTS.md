@@ -31,6 +31,16 @@ export MONEYFLOW_DATABASE_URL=postgresql://postgres:mf@localhost:5433/moneyflow_
 
 The test database and the dev database are separate. If the container exists but is stopped: `docker start mf-pg`.
 
+## Layout
+
+- `src/moneyflow/`: the package (`core`, `storage`, `services`, `api`).
+- `tools/`: scripts that are not part of the package. `tools/local` runs the local environment (`./local.sh`), `tools/metabase` provisions Metabase, `tools/import_old` reads the old repo, `tools/parity` compares results.
+- `deploy/`: `compose.yml`, Postgres init and the read-only role, and the Metabase dashboard JSON in `deploy/metabase/dashboards/`.
+
+## Which Postgres
+
+`mf-pg` on 5433 is for tests only (`moneyflow_test`). The local environment (`./local.sh up`, see README) runs its own Postgres on 5434 with `moneyflow_dev`. Tests never use `moneyflow_dev`, and nothing deletes `mf-pg`.
+
 ## Quality gates
 
 Gate thresholds (spec section 9): CRAP < 10 per function; duplication flagged at similarity >= 0.8; mutation testing on `src/moneyflow/core`.
