@@ -62,7 +62,8 @@ cp .env.example .env     # optional: `./local.sh up` creates .env with random pa
 - **Reset.** There is no reset command: `./local.sh stop`, then delete `.local/` by hand. The next `./local.sh up` recreates the bind directories under `.local/` before it starts the containers.
 - **Passwords.** `up` refuses to start while a password in `.env` is empty or still `change-me`; the message names the key only. Both ports are published on `127.0.0.1` only.
 - **Runtimes.** The local environment was tested on podman only, not on Docker Desktop.
-- **Memory.** Metabase's JVM heap is capped at 512 MB (JAVA_OPTS=-Xmx512m in deploy/compose.yml); the measured numbers are below.
+- **Memory.** Metabase runs with JAVA_OPTS="-Xmx384m -XX:+UseSerialGC -XX:ReservedCodeCacheSize=64m -Xss512k -XX:TieredStopAtLevel=1" in deploy/compose.yml; the measured numbers are below.
+- **Podman VM.** The podman VM needs 4 GB: podman machine set --memory 4096 (the machine must be stopped first).
 - **OOM check.** On podman, run `podman machine ssh` then `dmesg | grep -i 'killed process'`; any line means the VM killed a process for memory.
 - **podman without a socket file.** If the host has no podman API socket file, compose can reach the machine's socket over ssh: forward the machine's `/run/podman/podman.sock` to a local unix socket with `ssh -L`, and point `DOCKER_HOST` at that local socket.
 
@@ -81,7 +82,7 @@ Metabase is released under the AGPL. This repo only references the image `metaba
 
 ## Use from Claude Code
 
-The MCP server is read-only and talks to the local database. Take `POSTGRES_PASSWORD` from `.env`:
+The MCP server is read-only and talks to the local database. Take `MF_READER_PASSWORD` from `.env`:
 
 ```
 claude mcp add moneyflow -- uv run --directory /path/to/moneyflow python -m moneyflow mcp --db postgresql://mf_reader:<MF_READER_PASSWORD>@localhost:5434/moneyflow_dev

@@ -38,13 +38,18 @@ def test_agents_lists_new_layout_and_test_db_rule() -> None:
     assert "Tests never use `moneyflow_dev`" in AGENTS
 
 
+JAVA_OPTS = "-Xmx384m -XX:+UseSerialGC -XX:ReservedCodeCacheSize=64m -Xss512k -XX:TieredStopAtLevel=1"
+
+
 def test_readme_pins_metabase_heap_and_oom_check() -> None:
     memory = next(line for line in README.splitlines() if line.startswith("- **Memory.**"))
-    assert "-Xmx512m" in memory
+    assert "-Xmx512m" not in README
+    assert JAVA_OPTS in memory
     assert "deploy/compose.yml" in memory
     assert "about 2 GB" not in README
     assert "podman machine ssh" in README
     assert "dmesg | grep -i 'killed process'" in README
+    assert "The podman VM needs 4 GB: podman machine set --memory 4096 (the machine must be stopped first)." in README
 
 
 def test_readme_says_mf_old_repo_is_required_in_env() -> None:
@@ -56,6 +61,10 @@ def test_mcp_line_uses_the_read_only_role() -> None:
     line = next(line for line in README.splitlines() if "claude mcp add moneyflow" in line)
     assert "postgresql://mf_reader:<MF_READER_PASSWORD>@localhost:5434/moneyflow_dev" in line
     assert "POSTGRES_PASSWORD" not in line
+    lines = README.splitlines()
+    sentence = lines[lines.index(line) - 3]
+    assert "MF_READER_PASSWORD" in sentence
+    assert "POSTGRES_PASSWORD" not in sentence
 
 
 def test_agents_does_not_use_the_admin_role_for_mcp() -> None:

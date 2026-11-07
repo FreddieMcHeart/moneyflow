@@ -65,4 +65,8 @@ def test_metabase_heap_is_capped():
     env = _compose()["services"]["metabase"]["environment"]
     if isinstance(env, list):
         env = dict(item.split("=", 1) for item in env)
-    assert "-Xmx512m" in str(env.get("JAVA_OPTS", ""))
+    flags = str(env.get("JAVA_OPTS", "")).split()
+    assert flags == [
+        "-Xmx384m", "-XX:+UseSerialGC", "-XX:ReservedCodeCacheSize=64m",
+        "-Xss512k", "-XX:TieredStopAtLevel=1",
+    ]
