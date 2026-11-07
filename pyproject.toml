@@ -1,6 +1,6 @@
 [project]
 name = "moneyflow"
-version = "0.1.0"
+version = "0.1.1"
 description = "Personal finance ledger: a pure core, Postgres storage, MCP read tools"
 readme = "README.md"
 license = { text = "MIT" }
