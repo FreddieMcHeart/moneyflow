@@ -43,15 +43,14 @@ def _kinds(runner):
         if cmd[-2:] == ["compose", "version"]:
             continue
         joined = " ".join(cmd)
-        out.append("compose" if "compose" in cmd else "alembic" if "alembic" in joined else "import" if "tools.import_old" in joined else "rebuild")
+        out.append("compose" if "compose" in cmd else "alembic" if "alembic" in joined else "import" if "tools.import_old" in joined else "metabase" if "tools.metabase" in joined else "rebuild")
     return out
 
 
 def test_up_runs_steps_in_order(tmp_path):
     r, lines = Runner(), []
     assert local.up(_root(tmp_path), r, which=_which("docker"), out=lines.append) == 0
-    assert _kinds(r) == ["compose", "alembic", "import", "rebuild"]
-    assert any("SKIP" in line for line in lines)
+    assert _kinds(r) == ["compose", "alembic", "import", "rebuild", "metabase"]
     assert "docker" == r.calls[0][0][0]
 
 

@@ -99,7 +99,7 @@ def up(root: Path, runner: Runner, *, which: Which = shutil.which, environ: dict
         ("containers", lambda: runner(_compose_cmd(compose, root, "up", "-d", "--wait"))),
         ("migrations", lambda: runner(_py("alembic", "upgrade", "head"), env={"MONEYFLOW_DATABASE_URL": local_url(env)})),
         ("import and rebuild", lambda: import_and_rebuild(env, runner)),
-        ("metabase", lambda: _metabase_skip(out)),
+        ("metabase", lambda: runner(_py("tools.metabase"))),
     ]
     for name, step in steps:
         out(f"== {name}")
@@ -109,11 +109,6 @@ def up(root: Path, runner: Runner, *, which: Which = shutil.which, environ: dict
             return code
     out(f"postgres: {local_url(env, mask=True)}")
     out(f"metabase: http://localhost:{env.get('MF_MB_PORT', '3000')}")
-    return 0
-
-
-def _metabase_skip(out) -> int:
-    out("SKIP: Metabase provisioner (tools.metabase) is not wired yet; Task 5 adds it")
     return 0
 
 
