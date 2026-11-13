@@ -2,7 +2,10 @@
 
 import ast
 import csv
+import importlib
 import itertools
+import os
+import sys
 from collections import Counter
 from datetime import UTC, date, datetime, time
 from decimal import Decimal
@@ -10,7 +13,7 @@ from pathlib import Path
 
 import yaml
 
-from moneyflow.core.model import Account, FxRate, Owner, Person, Rule, Ruling, Transaction
+from moneyflow.core.model import Account, FxRate, Owner, Person, PlanLine, Rule, Ruling, Transaction
 
 _DIRECTIONS = ("income", "expense")
 _AMOUNT_KEYS = ("amount_lt", "amount_gte")
@@ -414,3 +417,38 @@ def read_reclassify_rules(source: Path) -> tuple[Rule, ...]:
     returns = _literal(source / "person_returns.py", "PERSON_RETURNS")
     rules += [_person_return_rule(d, t, i) for i, (d, t) in enumerate(returns.items())]  # type: ignore[attr-defined]
     return tuple(rules)
+
+
+def read_plan(old_repo: Path) -> list[PlanLine] | None:
+    """The old repo's Notion plan grid (`План`) as plan lines, read through the old repo's own reader.
+
+    The old modules are imported from `old_repo/scripts/python`, the way `tools.parity` loads them. Returns
+    None when there is no NOTION_TOKEN (the old repo's `.env`, then the environment). The token is never
+    printed, logged or put in an error message.
+    """
+    path = str(Path(old_repo) / "scripts" / "python")
+    if path not in sys.path:
+        sys.path.insert(0, path)
+    load = importlib.import_module
+    token = load("monobank_import").load_env(Path(old_repo) / ".env").get("NOTION_TOKEN") or os.environ.get(
+        "NOTION_TOKEN"
+    )
+    if not token:
+        return None
+    schema = load("notionsync.payloads").Schema.load(Path(old_repo) / "data" / "notion_schema.json")
+    client = load("notionsync.client").NotionClient(token)
+    rows = load("planexpand.read").read_grid(client, schema)
+    unkeyed = sum(1 for r in rows if not (r.key.month and r.key.category))
+    if unkeyed:
+        raise ValueError(f"{unkeyed} row(s) of the plan grid have no month or no category")
+    lines: dict[str, PlanLine] = {}
+    for r in rows:
+        subcategory = r.key.subcategory or ""
+        line_id = f"{r.key.month}|{r.key.category}|{subcategory}|{r.key.currency}"
+        if line_id in lines:
+            raise ValueError(f"duplicate plan grid key: {line_id}")
+        lines[line_id] = PlanLine(
+            id=line_id, budget_month=r.key.month, category=r.key.category, subcategory=subcategory,
+            currency=r.key.currency, amount=r.amount, source=r.source, handed_over=bool(r.handed_over),
+        )
+    return list(lines.values())

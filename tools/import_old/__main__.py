@@ -23,6 +23,7 @@ from tools.import_old.read import (
     read_overrides,
     read_owners,
     read_people,
+    read_plan,
     read_raw,
     read_reclassify_rules,
     read_reimbursement_rulings,
@@ -86,6 +87,7 @@ def run(old_repo: Path, conn: psycopg.Connection) -> dict[str, int]:
         print(f"  {tid}")
     exclude_rules = read_exclude_rules(source / "exclusions.py")
     reclassify_rules = read_reclassify_rules(source)
+    plan_lines = read_plan(Path(old_repo))
     counts = db.replace_imported(
         conn,
         owners=read_owners(data / "accounts.yaml"),
@@ -96,6 +98,7 @@ def run(old_repo: Path, conn: psycopg.Connection) -> dict[str, int]:
         categories=read_categories(data / "categories.yaml"),
         people=read_people(manual),
         fx_rates=read_fx_rates(data / "history" / "usd_rate.csv"),
+        plan_lines=plan_lines,
     )
     for table, c in counts.items():
         print(f"{table}: {c.inserted} inserted, {c.updated} updated, {c.deleted} deleted, {c.unchanged} unchanged")
@@ -104,6 +107,8 @@ def run(old_repo: Path, conn: psycopg.Connection) -> dict[str, int]:
     for kind, group in groups[1:]:
         print(f"imported {kind}: {sum(1 for g in group if g.transaction_id in known)}")
     print(f"imported attribute rulings: {len(attribution)}")
+    if plan_lines is None:
+        print("plan_lines: skipped (no NOTION_TOKEN)")
     return counts
 
 
