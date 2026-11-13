@@ -39,6 +39,19 @@ def drop_stale_databases(admin, base: str) -> None:
             admin.execute(f'drop database if exists "{name}" with (force)')
 
 
+def pytest_collection_modifyitems(config, items):
+    """Refuse the whole run once when DB tests are collected and the test database is not configured."""
+    if os.environ.get("MONEYFLOW_TEST_DATABASE_URL"):
+        return
+    needing = sum(1 for item in items if {"conn", "db_url"} & set(item.fixturenames))
+    if needing:
+        pytest.exit(
+            f"MONEYFLOW_TEST_DATABASE_URL is not set: {needing} collected tests need a real Postgres "
+            "(postgresql://.../moneyflow_test on mf-pg 5433, see AGENTS.md 'Local Postgres'). DB tests never skip.",
+            returncode=1,
+        )
+
+
 @pytest.fixture(scope="session")
 def db_url():
     """One database per pytest process, created from the configured one and dropped after.
