@@ -84,14 +84,16 @@ class FakeMetabase:
             card.update(body)
             return card, 200
         if path == "/api/dashboard" and method == "POST":
-            self.dashboards.append({"id": self._id(), "dashcards": [], **body})
+            self.dashboards.append({"id": self._id(), "dashcards": [], "parameters": [], **body})
             return self.dashboards[-1], 200
         if path == "/api/dashboard":
             return self.dashboards, 200
         if path.startswith("/api/dashboard/"):
             dash = next(d for d in self.dashboards if d["id"] == int(path.rsplit("/", 1)[1]))
             if method == "PUT":
-                dash["dashcards"] = body["dashcards"]
+                dash["dashcards"] = body["dashcards"]  # stored as sent, parameter_mappings included
+                if "parameters" in body:
+                    dash["parameters"] = body["parameters"]
             return dash, 200
         return {}, 404
 
@@ -269,6 +271,11 @@ class V065Metabase(FakeMetabase):
                                           for k, t in native["template-tags"].items()]
             card = next(c for c in self.cards if c["id"] == result["id"])
             card["dataset_query"] = {"lib/type": "mbql/query", "database": body["dataset_query"]["database"], "stages": [stage]}
+        if path.startswith("/api/dashboard/") and method == "PUT":
+            # checkpoint 1 on v0.65.3: parameters and mappings come back as sent, plus keys the server adds
+            result["parameters"] = [{**p, "sectionId": "string"} for p in result["parameters"]]
+            result["dashcards"] = [{**d, "entity_id": f"ent-{d['card_id']}", "parameter_mappings": [dict(m) for m in d.get("parameter_mappings", [])]}
+                                   for d in result["dashcards"]]
         return result, code
 
 
@@ -322,3 +329,94 @@ def test_run_prints_one_line_per_object_before_the_totals(fake, tmp_path, capsys
         assert "metabase: " + line in out
     assert out[-1] == "metabase: created 0, updated 0, unchanged 7" and len(out) == 8
     assert "secret" not in "".join(out)
+
+
+@pytest.fixture(params=[FakeMetabase, V065Metabase], ids=["legacy", "v065"])
+def any_fake(request):
+    server = request.param()
+    yield server
+    server.server.shutdown()
+
+
+def _param_defs(declared=None):
+    """Dash A: c1 uses the tag a_var, c2 uses none."""
+    defs = _tagged_defs("select 1 [[where a = {{a_var}}]]")
+    defs[0]["parameters"] = [{"name": "a_var", "type": "text"}] if declared is None else declared
+    return defs
+
+
+def _dash(fake, name="Dash A"):
+    return next(d for d in fake.dashboards if d["name"] == name)
+
+
+def test_dashboard_is_created_with_parameters_and_per_card_mappings(any_fake):
+    provision(Client(any_fake.url), ENV, _param_defs())
+    dash = _dash(any_fake)
+    (param,) = dash["parameters"]
+    assert (param["slug"], param["name"], param["type"]) == ("a_var", "A var", "string/=") and param["id"]
+    c1, c2 = dash["dashcards"]
+    assert c1["parameter_mappings"] == [{"parameter_id": param["id"], "card_id": c1["card_id"], "target": ["variable", ["template-tag", "a_var"]]}]
+    assert not c2.get("parameter_mappings")  # c2 does not use the tag
+    assert not _dash(any_fake, "Dash B")["parameters"]
+
+
+def test_second_provision_of_a_parameterised_dashboard_is_unchanged(any_fake):
+    provision(Client(any_fake.url), ENV, _param_defs())
+    before = len(any_fake.writes())
+    counts = provision(Client(any_fake.url), ENV, _param_defs())
+    assert len(any_fake.writes()) == before and counts.updated == 0
+    assert "dashboard Dash A: unchanged" in counts.log
+
+
+def test_a_stored_parameter_type_change_is_one_dashboard_update(any_fake):
+    provision(Client(any_fake.url), ENV, _param_defs())
+    _dash(any_fake)["parameters"][0]["type"] = "number/="
+    counts = provision(Client(any_fake.url), ENV, _param_defs())
+    assert counts.log.count("dashboard Dash A: updated") == 1 and counts.updated == 1
+    assert _dash(any_fake)["parameters"][0]["type"] == "string/="
+
+
+def test_a_missing_stored_mapping_is_one_dashboard_update(any_fake):
+    provision(Client(any_fake.url), ENV, _param_defs())
+    _dash(any_fake)["dashcards"][0]["parameter_mappings"] = []
+    counts = provision(Client(any_fake.url), ENV, _param_defs())
+    assert counts.log.count("dashboard Dash A: updated") == 1 and counts.updated == 1
+    assert _dash(any_fake)["dashcards"][0]["parameter_mappings"]
+
+
+def test_tag_type_change_alone_updates_the_card(any_fake):
+    """Guards _tag_view: a card whose only change is one template-tag type must be PUT."""
+    provision(Client(any_fake.url), ENV, _param_defs())
+    counts = provision(Client(any_fake.url), ENV, _param_defs([{"name": "a_var", "type": "number"}]))
+    assert "card c1: updated" in counts.log and "card c2: unchanged" in counts.log
+    query = next(c for c in any_fake.cards if c["name"] == "c1")["dataset_query"]
+    tags = query["stages"][0]["template-tags"] if "stages" in query else list(query["native"]["template-tags"].values())
+    assert [t["type"] for t in tags] == ["number"]
+
+
+def _write_definition(tmp_path, definition):
+    (tmp_path / "d.json").write_text(json.dumps(definition))
+    return tmp_path
+
+
+def _definition(parameters, sql="select 1 [[where a = {{a_var}}]]"):
+    return {"name": "D", "parameters": parameters, "cards": [{"name": "c", "sql": sql, "display": "table", "row": 0, "col": 0, "size_x": 1, "size_y": 1}]}
+
+
+@pytest.mark.parametrize("definition, needle", [
+    (_definition([]), "a_var"),                                                              # tag not declared
+    (_definition([{"name": "a_var", "type": "text"}, {"name": "unused", "type": "text"}]), "unused"),  # declared, no card uses it
+    (_definition([{"name": "a_var", "type": "date"}]), "date"),                              # unknown type
+], ids=["undeclared-tag", "unused-parameter", "unknown-type"])
+def test_load_definitions_refuses_a_bad_parameter_setup(tmp_path, definition, needle):
+    from tools.metabase.api import load_definitions
+
+    with pytest.raises(ValueError) as caught:
+        load_definitions(_write_definition(tmp_path, definition))
+    assert "d.json" in str(caught.value) and needle in str(caught.value)
+
+
+def test_load_definitions_accepts_a_consistent_setup(tmp_path):
+    from tools.metabase.api import load_definitions
+
+    assert len(load_definitions(_write_definition(tmp_path, _definition([{"name": "a_var", "type": "text"}])))) == 1
