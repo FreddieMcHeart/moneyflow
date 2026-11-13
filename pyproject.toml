@@ -15,7 +15,7 @@ dependencies = [
 [dependency-groups]
 dev = [
     "pytest>=8",
-    "coverage>=7",
+    "coverage>=7.17.2",
     "import-linter>=2",
     "pyyaml>=6.0.3",
     "requests>=2.34.2",
