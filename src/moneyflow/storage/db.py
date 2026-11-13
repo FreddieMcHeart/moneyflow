@@ -12,11 +12,11 @@ from alembic.config import Config
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
-from moneyflow.core.model import Account, FxRate, Inputs, Ledger, LedgerEntry, Owner, Person, Rule, Ruling, Transaction
+from moneyflow.core.model import Account, FxRate, Inputs, Ledger, LedgerEntry, Owner, Person, PlanLine, Rule, Ruling, Transaction
 from moneyflow.core.reports import MonthSummary
 
 _TABLES = ("owners", "accounts", "transactions", "rules", "rulings", "categories", "people")
-_TABLE_ORDER = ("owners", "accounts", "transactions", "rules", "rulings", "categories", "people", "fx_rates")
+_TABLE_ORDER = ("owners", "accounts", "transactions", "rules", "rulings", "categories", "people", "fx_rates", "plan_lines")
 _ALEMBIC_INI = Path(__file__).resolve().parents[3] / "alembic.ini"
 
 
@@ -380,6 +380,17 @@ def _replace_fx_rates(conn: psycopg.Connection, fx_rates: Iterable[FxRate]) -> C
     )
 
 
+def _replace_plan_lines(conn: psycopg.Connection, plan_lines: Iterable[PlanLine]) -> Counts:
+    return _sync_owned(
+        conn, "plan_lines",
+        ("id", "budget_month", "category", "subcategory", "currency", "amount", "source", "handed_over"),
+        {
+            p.id: (p.id, p.budget_month, p.category, p.subcategory, p.currency, p.amount, p.source, p.handed_over)
+            for p in plan_lines
+        },
+    )
+
+
 def replace_imported(
     conn: psycopg.Connection,
     *,
@@ -391,12 +402,14 @@ def replace_imported(
     categories: Iterable[str],
     people: Iterable[Person],
     fx_rates: Iterable[FxRate],
+    plan_lines: Iterable[PlanLine] | None = None,
 ) -> dict[str, Counts]:
     """One transaction: write only what changed, return (inserted, updated, deleted, unchanged) per table.
 
     Facts are upserted by id with a change test; import-owned decision rows, people and FX rates are
     compared by id against what is stored. A re-import of unchanged input writes nothing. Stored
-    transactions missing from the source are never deleted.
+    transactions missing from the source are never deleted. `plan_lines=None` leaves the table untouched and
+    the result has no entry for it.
 
     An import ruling whose transaction is not among the incoming `transactions` survives the
     re-import. Such a ruling can name a category that a later `categories.yaml` drops; `categorize`
@@ -407,4 +420,6 @@ def replace_imported(
         counts = _upsert_facts(conn, owners, accounts, transactions)
         counts |= _replace_decisions(conn, rules, rulings, categories, people, [t.id for t in transactions])
         counts["fx_rates"] = _replace_fx_rates(conn, fx_rates)
-        return {t: counts[t] for t in _TABLE_ORDER}
+        if plan_lines is not None:
+            counts["plan_lines"] = _replace_plan_lines(conn, plan_lines)
+        return {t: counts[t] for t in _TABLE_ORDER if t in counts}
