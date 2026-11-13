@@ -182,26 +182,54 @@ def _upsert_card(client: Client, card: dict, database_id: int, collection_id: in
     return current["id"]
 
 
+PARAMETER_TYPES = {"text": "string/=", "number": "number/="}
+
+
 def _layout(dashcards: list[dict]) -> list[tuple]:
     return sorted((d["card_id"], d["row"], d["col"], d["size_x"], d["size_y"]) for d in dashcards)
 
 
+def _dashboard_parameters(definition: dict) -> list[dict]:
+    return [{"id": uuid.uuid5(uuid.NAMESPACE_URL, f"moneyflow/{definition['name']}/{p['name']}").hex[:8],
+             "name": p["name"].replace("_", " ").capitalize(), "slug": p["name"],
+             "type": PARAMETER_TYPES[p.get("type", "text")]}
+            for p in definition.get("parameters") or []]
+
+
+def _parameter_view(parameters: list[dict] | None) -> list[tuple]:
+    """Only what we set: Metabase adds keys such as sectionId."""
+    return sorted((p["id"], p["slug"], p["type"]) for p in parameters or [])
+
+
+def _mapping_view(dashcards: list[dict]) -> list[tuple]:
+    return sorted((d["card_id"], m["parameter_id"], json.dumps(m["target"]))
+                  for d in dashcards for m in d.get("parameter_mappings") or [])
+
+
 def _upsert_dashboard(client: Client, definition: dict, card_ids: list[int], collection_id: int,
                       existing: dict[str, dict], counts: Counts) -> None:
-    dashcards = [
-        {"id": -(i + 1), "card_id": card_id, "row": card["row"], "col": card["col"],
-         "size_x": card["size_x"], "size_y": card["size_y"], "visualization_settings": {}}
-        for i, (card, card_id) in enumerate(zip(definition["cards"], card_ids))
-    ]
+    parameters = _dashboard_parameters(definition)
+    dashcards = []
+    for i, (card, card_id) in enumerate(zip(definition["cards"], card_ids)):
+        used = set(TAG_VAR.findall(card["sql"]))
+        mappings = [{"parameter_id": p["id"], "card_id": card_id, "target": ["variable", ["template-tag", p["slug"]]]}
+                    for p in parameters if p["slug"] in used]
+        dashcards.append({"id": -(i + 1), "card_id": card_id, "row": card["row"], "col": card["col"],
+                          "size_x": card["size_x"], "size_y": card["size_y"], "visualization_settings": {},
+                          "parameter_mappings": mappings})
+    body = {"dashcards": dashcards, "parameters": parameters}
     current = existing.get(definition["name"])
     if current is None:
         created = client.post("/api/dashboard", {"name": definition["name"], "collection_id": collection_id})
-        client.put(f"/api/dashboard/{created['id']}", {"dashcards": dashcards})
+        client.put(f"/api/dashboard/{created['id']}", body)
         counts.record("dashboard", definition["name"], "created")
         return
     stored = client.get(f"/api/dashboard/{current['id']}")
-    if _layout(stored.get("dashcards") or []) != _layout(dashcards):
-        client.put(f"/api/dashboard/{current['id']}", {"dashcards": dashcards})
+    stored_cards = stored.get("dashcards") or []
+    if (_layout(stored_cards) != _layout(dashcards)
+            or _parameter_view(stored.get("parameters")) != _parameter_view(parameters)
+            or _mapping_view(stored_cards) != _mapping_view(dashcards)):
+        client.put(f"/api/dashboard/{current['id']}", body)
         counts.record("dashboard", definition["name"], "updated")
     else:
         counts.record("dashboard", definition["name"], "unchanged")
@@ -213,6 +241,15 @@ def load_definitions(directory: Path) -> list[dict]:
         definition = json.loads(path.read_text())
         if "name" not in definition or "cards" not in definition:
             raise ValueError(f"{path.name}: needs name and cards")
+        declared = {p["name"]: p.get("type", "text") for p in definition.get("parameters") or []}
+        for name, kind in declared.items():
+            if kind not in PARAMETER_TYPES:
+                raise ValueError(f"{path.name}: parameter {name} has unknown type {kind}, use one of {sorted(PARAMETER_TYPES)}")
+        used = {tag for card in definition["cards"] for tag in TAG_VAR.findall(card["sql"])}
+        for tag in sorted(used - set(declared)):
+            raise ValueError(f"{path.name}: a card uses {{{{{tag}}}}} but parameters does not declare it")
+        for name in sorted(set(declared) - used):
+            raise ValueError(f"{path.name}: parameter {name} is declared but no card uses it")
         definitions.append(definition)
     return definitions
 
