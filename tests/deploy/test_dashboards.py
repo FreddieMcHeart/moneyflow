@@ -30,7 +30,8 @@ def test_exactly_three_dashboards():
 @pytest.mark.parametrize("path", FILES, ids=lambda p: p.name)
 def test_format(path):
     data = json.loads(path.read_text())
-    assert set(data) == {"name", "cards"} and isinstance(data["name"], str) and data["cards"]
+    assert set(data) == {"name", "parameters", "cards"} and isinstance(data["name"], str) and data["cards"]
+    assert data["parameters"] and all(set(p) == {"name", "type"} for p in data["parameters"])
     names = [c["name"] for c in data["cards"]]
     assert len(names) == len(set(names))
     for card in data["cards"]:

@@ -1,16 +1,17 @@
 {
   "name": "Categories by cycle",
+  "parameters": [{"name": "category", "type": "text"}],
   "cards": [
     {
       "name": "Category by budget month (UAH)",
-      "sql": "select coalesce(category, 'Uncategorized') as category, budget_month, sum(amount_uah) as amount_uah from ledger_entries where direction <> 'income' and status in ('kept', 'unresolved') and budget_month is not null group by category, budget_month order by budget_month, category",
+      "sql": "select coalesce(category, 'Uncategorized') as category, budget_month, sum(amount_uah) as amount_uah from ledger_entries where direction <> 'income' and status in ('kept', 'unresolved') and budget_month is not null [[and category = {{category}}]] group by category, budget_month order by budget_month, category",
       "display": "table",
       "visualization_settings": {},
       "row": 0, "col": 0, "size_x": 24, "size_y": 8
     },
     {
       "name": "Total by budget month (UAH)",
-      "sql": "select budget_month, sum(amount_uah) as amount_uah from ledger_entries where direction <> 'income' and status in ('kept', 'unresolved') and budget_month is not null group by budget_month order by budget_month",
+      "sql": "select budget_month, sum(amount_uah) as amount_uah from ledger_entries where direction <> 'income' and status in ('kept', 'unresolved') and budget_month is not null [[and category = {{category}}]] group by budget_month order by budget_month",
       "display": "bar",
       "visualization_settings": {"graph.dimensions": ["budget_month"], "graph.metrics": ["amount_uah"]},
       "row": 8, "col": 0, "size_x": 24, "size_y": 6
