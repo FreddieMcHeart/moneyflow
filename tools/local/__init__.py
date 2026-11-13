@@ -86,9 +86,9 @@ def _py(*args: str) -> list[str]:
 
 
 def import_and_rebuild(env: dict[str, str], runner: Runner) -> int:
-    url = local_url(env)
-    code = runner(_py("tools.import_old", "--old-repo", env["MF_OLD_REPO"], "--db", url))
-    return code or runner(_py("moneyflow", "rebuild", "--db", url))
+    url_env = {"MONEYFLOW_DATABASE_URL": local_url(env)}
+    code = runner(_py("tools.import_old", "--old-repo", env["MF_OLD_REPO"]), env=url_env)
+    return code or runner(_py("moneyflow", "rebuild"), env=url_env)
 
 
 def check_old_repo(env: dict[str, str]) -> str:

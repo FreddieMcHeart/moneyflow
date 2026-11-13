@@ -1,6 +1,7 @@
 """python -m tools.import_old --old-repo PATH --db URL"""
 
 import argparse
+import os
 from dataclasses import replace
 from pathlib import Path
 
@@ -109,8 +110,10 @@ def run(old_repo: Path, conn: psycopg.Connection) -> dict[str, int]:
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(prog="python -m tools.import_old")
     parser.add_argument("--old-repo", required=True, type=Path)
-    parser.add_argument("--db", required=True)
+    parser.add_argument("--db", default=os.environ.get("MONEYFLOW_DATABASE_URL"))
     args = parser.parse_args(argv)
+    if not args.db:
+        parser.error("--db or MONEYFLOW_DATABASE_URL is required")
     with db.connect(args.db) as conn:
         run(args.old_repo, conn)
 

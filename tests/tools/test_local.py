@@ -199,3 +199,23 @@ def test_up_refuses_empty_or_placeholder_password_naming_only_the_key(tmp_path, 
     assert _kinds(r) == []
     assert any("MB_ADMIN_PASSWORD" in line for line in lines)
     assert not any("change-me" in line for line in lines)
+
+
+def test_up_passes_no_password_or_url_in_any_argv(tmp_path):
+    root = _root(tmp_path)
+    password = read_env(root / ".env")["POSTGRES_PASSWORD"]
+    r = Runner()
+    assert local.up(root, r, which=_which("docker"), out=lambda s: None) == 0
+    for cmd, _ in r.calls:
+        joined = " ".join(cmd)
+        assert password not in joined and "postgresql://" not in joined
+
+
+def test_up_hands_the_url_to_import_and_rebuild_through_the_environment(tmp_path):
+    root = _root(tmp_path)
+    r = Runner()
+    assert local.up(root, r, which=_which("docker"), out=lambda s: None) == 0
+    url = local_url(read_env(root / ".env"))
+    by_kind = dict(zip(_kinds(r), [env for (cmd, env) in r.calls if cmd[-2:] != ["compose", "version"]], strict=True))
+    assert by_kind["import"] == {"MONEYFLOW_DATABASE_URL": url}
+    assert by_kind["rebuild"] == {"MONEYFLOW_DATABASE_URL": url}
