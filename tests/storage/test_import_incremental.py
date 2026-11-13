@@ -4,15 +4,22 @@ from dataclasses import replace
 from datetime import date
 from decimal import Decimal
 
-from moneyflow.core.model import FxRate
+from moneyflow.core.model import FxRate, PlanLine
 from moneyflow.storage import db
 from tests.core._builders import account, owner, person, rule, ruling, tx
 
 _KEYS = {
     "owners": "id", "accounts": "id", "transactions": "id", "rules": "id", "rulings": "id",
-    "categories": "name", "people": "id", "fx_rates": "id",
+    "categories": "name", "people": "id", "fx_rates": "id", "plan_lines": "id",
 }
 _ZERO = (0, 0, 0)
+
+
+def _plan(category: str, subcategory: str = "", amount: str = "100.00") -> PlanLine:
+    return PlanLine(
+        id=f"2026-01|{category}|{subcategory}|UAH", budget_month="2026-01", category=category,
+        subcategory=subcategory, currency="UAH", amount=Decimal(amount), source="template", handed_over=False,
+    )
 
 
 def _import_rule(id: str, **match):
@@ -33,6 +40,7 @@ def _input(**over):
         categories=("food", "misc"),
         people=(person("alice", "Alice", "12.50", "n"),),
         fx_rates=(FxRate("x1", date(2026, 1, 5), Decimal("41.2500"), "sell", "bank"),),
+        plan_lines=(_plan("food"), _plan("misc", "x")),
     )
     base.update(over)
     return base
@@ -57,7 +65,7 @@ def _iud(counts, table):
 def test_second_import_of_same_input_writes_nothing(conn):
     first = _write(conn)
     assert all(first[t][0] > 0 for t in ("owners", "accounts", "transactions", "rules", "rulings", "categories",
-                                         "people", "fx_rates"))
+                                         "people", "fx_rates", "plan_lines"))
     before = _xmins(conn)
     second = _write(conn)
     assert set(second) == set(_KEYS)
@@ -163,3 +171,24 @@ def test_stale_transaction_and_its_ruling_are_kept(conn):
     assert _iud(got, "transactions") == _ZERO
     assert _iud(got, "rulings") == _ZERO  # g1 belongs to stale t1: kept, as before
     assert db.stale_transaction_ids(conn, ["t2"]) == ["t1"]
+
+
+def test_second_plan_lines_import_is_zero_zero_zero_and_one_dropped_line_is_one_delete(conn):
+    assert _iud(_write(conn), "plan_lines") == (2, 0, 0)
+    assert _iud(_write(conn), "plan_lines") == _ZERO
+    counts = _write(conn, plan_lines=(_plan("food"),))
+    assert _iud(counts, "plan_lines") == (0, 0, 1)
+    assert [r["id"] for r in conn.execute("select id from plan_lines").fetchall()] == ["2026-01|food||UAH"]
+
+
+def test_changed_plan_amount_is_one_update(conn):
+    _write(conn)
+    counts = _write(conn, plan_lines=(_plan("food", amount="150.00"), _plan("misc", "x")))
+    assert _iud(counts, "plan_lines") == (0, 1, 0)
+
+
+def test_plan_lines_none_leaves_the_table_alone_and_returns_no_entry(conn):
+    _write(conn)
+    counts = _write(conn, plan_lines=None)
+    assert "plan_lines" not in counts
+    assert conn.execute("select count(*) as n from plan_lines").fetchone()["n"] == 2
