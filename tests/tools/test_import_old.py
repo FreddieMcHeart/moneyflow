@@ -1,5 +1,6 @@
 """Synthetic old-repo trees built in tmp_path; no real data."""
 
+import sys
 import textwrap
 from datetime import date, datetime
 from decimal import Decimal
@@ -12,7 +13,15 @@ from moneyflow.services.rebuild import rebuild
 from moneyflow.storage import db
 from tests.core._builders import TODAY
 from tools.import_old.__main__ import main, run
-from tools.import_old.read import read_accounts, read_categories, read_overrides, read_owners, read_raw, read_rules
+from tools.import_old.read import (
+    read_accounts,
+    read_categories,
+    read_overrides,
+    read_owners,
+    read_plan,
+    read_raw,
+    read_rules,
+)
 
 _HEADER = "date,time,amount,currency,direction,mcc,description,comment,category,id"
 _HEADER_UAH = "date,time,amount_uah,direction,mcc,description,comment,category,id"
@@ -60,6 +69,58 @@ _MILES = re.compile(r"виведення\\s+миль", re.IGNORECASE)
 """
 
 
+_OLD_MODULES = ("monobank_import", "notionsync", "planexpand")
+
+_LOAD_ENV_SOURCE = """def load_env(path):
+    env = {}
+    if path.exists():
+        for line in path.read_text().splitlines():
+            if "=" in line:
+                k, v = line.split("=", 1)
+                env[k.strip()] = v.strip()
+    return env
+"""
+
+_PLAN_PAYLOADS_SOURCE = """class Schema:
+    @classmethod
+    def load(cls, path):
+        return cls()
+"""
+
+_PLAN_CLIENT_SOURCE = """class NotionClient:
+    def __init__(self, token):
+        self.token = token
+"""
+
+_PLAN_READ_SOURCE = """from decimal import Decimal
+from types import SimpleNamespace
+
+ROWS = {rows!r}
+
+
+def read_grid(client, schema):
+    assert client.token == {token!r}
+    return [
+        SimpleNamespace(
+            key=SimpleNamespace(month=m, category=c, subcategory=s, currency=cur),
+            amount=a, source=src, handed_over=h, page_id="page-" + str(i), created_by=None,
+        )
+        for i, (m, c, s, cur, a, src, h) in enumerate(ROWS)
+    ]
+"""
+
+
+@pytest.fixture(autouse=True)
+def _isolated_old_modules(monkeypatch):
+    """`read_plan` puts the fake old repo on sys.path and imports from it; undo both after each test."""
+    monkeypatch.delenv("NOTION_TOKEN", raising=False)
+    saved = list(sys.path)
+    yield
+    sys.path[:] = saved
+    for name in [n for n in sys.modules if n.split(".")[0] in _OLD_MODULES]:
+        del sys.modules[name]
+
+
 def _accounts_yaml(*accounts: tuple[str, str, bool], owners: dict | None = None, budget_owner: str = "o") -> str:
     return yaml.safe_dump(
         {
@@ -99,6 +160,7 @@ def _old_repo(
     finance.mkdir(parents=True)
     (finance / "cash.py").write_text(_CASH_SOURCE)
     (finance / "fx.py").write_text(_FX_SOURCE)
+    (finance.parent / "monobank_import.py").write_text(_LOAD_ENV_SOURCE)
     (data / "history").mkdir()
     (data / "history" / "usd_rate.csv").write_text("\n".join([_FX_HEADER, *fx_rows]) + "\n")
     (finance / "exclusions.py").write_text(exclusions_source)
@@ -706,3 +768,72 @@ def test_cli_without_db_and_without_the_variable_exits_with_the_message(tmp_path
     with pytest.raises(SystemExit):
         main(["--old-repo", str(tmp_path)])
     assert "--db or MONEYFLOW_DATABASE_URL is required" in capsys.readouterr().err
+
+
+_GRID = (
+    ("2026-01", "food", None, "UAH", Decimal("100.00"), "template", "2026-01-02"),
+    ("2026-01", "food", "cafe", "USD", Decimal("5.50"), None, None),
+)
+
+
+def _plan_repo(tmp_path: Path, rows=_GRID, token: str = "tok-test") -> Path:
+    """A fake old repo whose `planexpand.read.read_grid` returns `rows` for a client built with `token`."""
+    repo = _old_repo(tmp_path)
+    python = repo / "scripts" / "python"
+    for package in ("notionsync", "planexpand"):
+        (python / package).mkdir()
+        (python / package / "__init__.py").write_text("")
+    (python / "notionsync" / "payloads.py").write_text(_PLAN_PAYLOADS_SOURCE)
+    (python / "notionsync" / "client.py").write_text(_PLAN_CLIENT_SOURCE)
+    (python / "planexpand" / "read.py").write_text(_PLAN_READ_SOURCE.format(rows=tuple(rows), token=token))
+    return repo
+
+
+def test_read_plan_maps_grid_rows_to_plan_lines(tmp_path, monkeypatch):
+    monkeypatch.setenv("NOTION_TOKEN", "tok-test")
+    lines = read_plan(_plan_repo(tmp_path))
+    assert [(p.id, p.budget_month, p.category, p.subcategory, p.currency, p.amount, p.source, p.handed_over)
+            for p in lines] == [
+        ("2026-01|food||UAH", "2026-01", "food", "", "UAH", Decimal("100.00"), "template", True),
+        ("2026-01|food|cafe|USD", "2026-01", "food", "cafe", "USD", Decimal("5.50"), None, False),
+    ]
+
+
+def test_read_plan_reads_the_token_from_the_old_repo_env_file(tmp_path):
+    repo = _plan_repo(tmp_path)
+    (repo / ".env").write_text("NOTION_TOKEN=tok-test\n")
+    assert len(read_plan(repo)) == 2
+
+
+def test_read_plan_without_a_token_returns_none(tmp_path):
+    assert read_plan(_plan_repo(tmp_path)) is None
+
+
+def test_read_plan_refuses_a_duplicate_key(tmp_path, monkeypatch):
+    monkeypatch.setenv("NOTION_TOKEN", "tok-test")
+    with pytest.raises(ValueError, match="duplicate"):
+        read_plan(_plan_repo(tmp_path, rows=(*_GRID, _GRID[0])))
+
+
+def test_read_plan_refuses_a_row_without_a_month_and_never_prints_the_token(tmp_path, monkeypatch):
+    monkeypatch.setenv("NOTION_TOKEN", "tok-test")
+    rows = (*_GRID, (None, "food", None, "EUR", Decimal("1.00"), None, None))
+    with pytest.raises(ValueError, match="1 row") as caught:
+        read_plan(_plan_repo(tmp_path, rows=rows))
+    assert "tok-test" not in str(caught.value)
+
+
+def test_run_prints_the_skipped_line_without_a_token_and_leaves_plan_lines_alone(conn, tmp_path, capsys):
+    counts = run(_plan_repo(tmp_path), conn)
+    assert "plan_lines" not in counts
+    assert capsys.readouterr().out.rstrip().endswith("plan_lines: skipped (no NOTION_TOKEN)")
+    assert conn.execute("select count(*) as n from plan_lines").fetchone()["n"] == 0
+
+
+def test_run_imports_the_plan_lines_and_a_second_run_changes_nothing(conn, tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("NOTION_TOKEN", "tok-test")
+    repo = _plan_repo(tmp_path)
+    assert run(repo, conn)["plan_lines"] == (2, 0, 0, 0)
+    assert "plan_lines: 2 inserted, 0 updated, 0 deleted, 0 unchanged" in capsys.readouterr().out
+    assert run(repo, conn)["plan_lines"] == (0, 0, 0, 2)
+    assert "skipped" not in capsys.readouterr().out

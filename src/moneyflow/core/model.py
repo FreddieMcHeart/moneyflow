@@ -38,6 +38,18 @@ class FxRate:
 
 
 @dataclass(frozen=True)
+class PlanLine:
+    id: str
+    budget_month: str
+    category: str
+    subcategory: str
+    currency: str
+    amount: Decimal
+    source: str | None
+    handed_over: bool
+
+
+@dataclass(frozen=True)
 class Person:
     id: str
     display: str
