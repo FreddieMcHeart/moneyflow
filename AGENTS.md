@@ -26,12 +26,10 @@ copies left by a killed worker are dropped at the next session start.
 ```
 docker run -d --name mf-pg -e POSTGRES_PASSWORD=mf -p 5433:5432 postgres:16
 docker exec mf-pg createdb -U postgres moneyflow_test
-docker exec mf-pg createdb -U postgres moneyflow_dev
 export MONEYFLOW_TEST_DATABASE_URL=postgresql://postgres:mf@localhost:5433/moneyflow_test
-export MONEYFLOW_DATABASE_URL=postgresql://postgres:mf@localhost:5433/moneyflow_dev
 ```
 
-The test database and the dev database are separate. If the container exists but is stopped: `docker start mf-pg`.
+The dev database is not here: it lives in the local environment on 5434 (see Which Postgres below). If the container exists but is stopped: `docker start mf-pg`.
 
 ## Layout
 
