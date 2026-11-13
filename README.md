@@ -26,11 +26,9 @@ git clone https://github.com/FreddieMcHeart/moneyflow.git
 cd moneyflow
 uv sync
 
-docker run -d --name mf-pg -e POSTGRES_PASSWORD=mf -p 5433:5432 postgres:16
-docker exec mf-pg createdb -U postgres moneyflow_dev
-export MONEYFLOW_DATABASE_URL=postgresql://postgres:mf@localhost:5433/moneyflow_dev
+./local.sh up    # needs MF_OLD_REPO in .env, see "Local environment" below
+export MONEYFLOW_DATABASE_URL=postgresql://postgres:<POSTGRES_PASSWORD from .env>@localhost:5434/moneyflow_dev
 
-uv run alembic upgrade head
 uv run python -m moneyflow rebuild --db "$MONEYFLOW_DATABASE_URL"
 uv run python -m moneyflow mcp --db "$MONEYFLOW_DATABASE_URL"
 ```
@@ -75,7 +73,7 @@ cp .env.example .env     # optional: `./local.sh up` creates .env with random pa
 | `mf-pg` (the `docker run` in [AGENTS.md](AGENTS.md)) | 5433 | `moneyflow_test` | the test suite only |
 | local environment (`./local.sh up`) | 5434 | `moneyflow_dev`, `metabase` | development data and Metabase |
 
-Tests never use `moneyflow_dev`. `mf-pg` stays as it is; nothing here deletes it. The Quick start above uses `mf-pg` for a throwaway dev database; with the local environment, point `MONEYFLOW_DATABASE_URL` at port 5434 instead.
+Tests never use `moneyflow_dev`. `mf-pg` stays as it is; nothing here deletes it.
 
 ### Metabase licence
 

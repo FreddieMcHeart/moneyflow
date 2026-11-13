@@ -11,7 +11,7 @@ import yaml
 from moneyflow.services.rebuild import rebuild
 from moneyflow.storage import db
 from tests.core._builders import TODAY
-from tools.import_old.__main__ import run
+from tools.import_old.__main__ import main, run
 from tools.import_old.read import read_accounts, read_categories, read_overrides, read_owners, read_raw, read_rules
 
 _HEADER = "date,time,amount,currency,direction,mcc,description,comment,category,id"
@@ -692,3 +692,17 @@ def test_cash_opening_imported_on_cash_account(conn, tmp_path):
     assert got["cash-test"].cash_opening == Decimal("250.50")
     assert got["cash-test"].cash_from == date(2026, 11, 1)
     assert got["acc1"].cash_opening is None
+
+
+def test_cli_reads_the_url_from_the_environment(conn, db_url, tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("MONEYFLOW_DATABASE_URL", db_url)
+    main(["--old-repo", str(_db_repo(tmp_path))])
+    assert "imported attribute rulings: 0" in capsys.readouterr().out
+    assert len(db.load_inputs(conn, today=TODAY).rulings) == 2
+
+
+def test_cli_without_db_and_without_the_variable_exits_with_the_message(tmp_path, monkeypatch, capsys):
+    monkeypatch.delenv("MONEYFLOW_DATABASE_URL", raising=False)
+    with pytest.raises(SystemExit):
+        main(["--old-repo", str(tmp_path)])
+    assert "--db or MONEYFLOW_DATABASE_URL is required" in capsys.readouterr().err

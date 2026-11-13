@@ -201,3 +201,17 @@ def test_stored_summary_equals_the_on_demand_query_for_the_same_today(conn):
         assert (r["cycle_start"], r["cycle_end"], r["cycle_open"], r["days_total"], r["days_left"], r["cash_in_hand"]) == (
             s.cycle_start, s.cycle_end, s.cycle_open, s.days_total, s.days_left, s.cash_in_hand)
         assert r["built_for"] == today
+
+
+def test_cli_reads_the_url_from_the_environment(conn, db_url, monkeypatch, capsys):
+    _seed(conn)
+    monkeypatch.setenv("MONEYFLOW_DATABASE_URL", db_url)
+    assert main(["rebuild"]) == 0
+    assert capsys.readouterr().out.strip() == "kept 1, unresolved 1, excluded 0"
+
+
+def test_cli_without_db_and_without_the_variable_exits_with_the_message(monkeypatch, capsys):
+    monkeypatch.delenv("MONEYFLOW_DATABASE_URL", raising=False)
+    with pytest.raises(SystemExit):
+        main(["rebuild"])
+    assert "--db or MONEYFLOW_DATABASE_URL is required" in capsys.readouterr().err
