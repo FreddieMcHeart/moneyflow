@@ -1,5 +1,6 @@
 {
   "name": "Month",
+  "parameters": [{"name": "budget_month", "type": "text"}],
   "cards": [
     {
       "name": "Month summary",
