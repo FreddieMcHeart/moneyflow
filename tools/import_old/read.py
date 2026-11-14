@@ -5,6 +5,7 @@ import csv
 import importlib
 import itertools
 import os
+import re
 import sys
 from collections import Counter
 from datetime import UTC, date, datetime, time
@@ -19,6 +20,7 @@ _DIRECTIONS = ("income", "expense")
 _AMOUNT_KEYS = ("amount_lt", "amount_gte")
 _DEFAULT_FLOOR_STEP = Decimal("5")
 _FOP_FLOOR_STEP = Decimal("100")
+_MONTH_TITLE = re.compile(r"\d{4}-\d{2}")
 
 
 def _load(path: Path) -> dict:
@@ -419,8 +421,63 @@ def read_reclassify_rules(source: Path) -> tuple[Rule, ...]:
     return tuple(rules)
 
 
+def _plain(prop: object) -> str:
+    """A Notion property as text: a select's name, the joined plain_text of a rich_text or title, else ""."""
+    if not isinstance(prop, dict):
+        return ""
+    kind = prop.get("type")
+    if kind == "select":
+        return str((prop.get("select") or {}).get("name") or "")
+    if kind in ("rich_text", "title"):
+        return "".join(str(part.get("plain_text") or "") for part in prop.get(kind) or ())
+    return ""
+
+
+def _months(client: object, schema: object) -> dict[str, str]:
+    """Months page id -> its YYYY-MM title; a page with any other title is left out."""
+    titles = {}
+    for page in client.query_database(schema.database_id("months")):  # type: ignore[attr-defined]
+        title = _plain(page["properties"].get("Name")).strip()
+        if _MONTH_TITLE.fullmatch(title):
+            titles[page["id"]] = title
+    return titles
+
+
+def _monthly_budget_lines(client: object, schema: object, months: dict[str, str], no_sub: str) -> list[PlanLine]:
+    """One plan line per Monthly Budget page that has a `Plan` (0 counts, None and non-numbers do not)."""
+    lines: dict[str, PlanLine] = {}
+    bad = 0
+    for page in client.query_database(schema.database_id("monthly_budget")):  # type: ignore[attr-defined]
+        props = page["properties"]
+        plan = (props.get("Plan") or {}).get("number")
+        if isinstance(plan, bool) or not isinstance(plan, (int, float)):
+            continue
+        related = (props.get("Month") or {}).get("relation") or ()
+        month = months.get(related[0]["id"]) if related else None
+        category, currency = _plain(props.get("Category")), _plain(props.get("Currency"))
+        subcategory = _plain(props.get("Subcategory"))
+        subcategory = "" if subcategory == no_sub else subcategory
+        if not (month and category and currency):
+            bad += 1
+            continue
+        line_id = f"{month}|{category}|{subcategory}|{currency}"
+        if line_id in lines:
+            raise ValueError(f"duplicate Monthly Budget key: {line_id}")
+        lines[line_id] = PlanLine(
+            id=line_id, budget_month=month, category=category, subcategory=subcategory, currency=currency,
+            amount=Decimal(str(plan)), source="monthly_budget", handed_over=True,
+        )
+    if bad:
+        raise ValueError(f"{bad} Monthly Budget row(s) with a plan have no YYYY-MM month, no category or no currency")
+    return list(lines.values())
+
+
 def read_plan(old_repo: Path) -> list[PlanLine] | None:
-    """The old repo's Notion plan grid (`План`) as plan lines, read through the old repo's own reader.
+    """The old repo's Notion plan as plan lines, read through the old repo's own reader.
+
+    Hybrid source: a month that Monthly Budget holds (any row with a `Plan`) takes Monthly Budget's lines
+    whole, and every other month takes the `План` grid; a grid key of a Monthly Budget month that Monthly
+    Budget lacks is dropped.
 
     The old modules are imported from `old_repo/scripts/python`, the way `tools.parity` loads them. Returns
     None when there is no NOTION_TOKEN (the old repo's `.env`, then the environment). The token is never
@@ -451,4 +508,7 @@ def read_plan(old_repo: Path) -> list[PlanLine] | None:
             id=line_id, budget_month=r.key.month, category=r.key.category, subcategory=subcategory,
             currency=r.key.currency, amount=r.amount, source=r.source, handed_over=bool(r.handed_over),
         )
-    return list(lines.values())
+    no_sub = load("notionsync.model").NO_SUBCATEGORY
+    budget = _monthly_budget_lines(client, schema, _months(client, schema), no_sub)
+    budget_months = {line.budget_month for line in budget}
+    return budget + [line for line in lines.values() if line.budget_month not in budget_months]
