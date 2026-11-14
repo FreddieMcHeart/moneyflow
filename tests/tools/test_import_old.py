@@ -90,14 +90,23 @@ _PLAN_PAYLOADS_SOURCE = """class Schema:
         return name
 """
 
-_PLAN_CLIENT_SOURCE = """PAGES = {pages!r}
+_PLAN_CLIENT_SOURCE = """from pathlib import Path
+
+PAGES = {pages!r}
+
+
+def _record(event):
+    with Path(__file__).with_name("calls.log").open("a") as f:
+        f.write(event + "\\n")
 
 
 class NotionClient:
     def __init__(self, token):
         self.token = token
+        _record("built")
 
     def query_database(self, database_id):
+        _record("queried " + database_id)
         return list(PAGES.get(database_id, ()))
 """
 
@@ -941,4 +950,25 @@ def test_read_plan_refuses_two_monthly_budget_pages_on_one_key(tmp_path, monkeyp
 
 def test_read_plan_without_a_token_returns_none_even_when_monthly_budget_has_pages(tmp_path):
     pages = {"months": list(_MONTHS), "monthly_budget": [_mb_page("m-jan", "food", "", "UAH", 120)]}
-    assert read_plan(_plan_repo(tmp_path, pages=pages)) is None
+    repo = _plan_repo(tmp_path, pages=pages)
+    assert read_plan(repo) is None
+    calls = repo / "scripts" / "python" / "notionsync" / "calls.log"
+    assert not calls.exists(), calls.read_text() if calls.exists() else ""
+
+
+def test_read_plan_returns_monthly_budget_in_page_order_then_the_kept_grid_lines(tmp_path, monkeypatch):
+    pages = [_mb_page("m-jan", "rent", "", "UAH", 900), _mb_page("m-jan", "food", "", "UAH", 120)]
+    lines = _hybrid(tmp_path, monkeypatch, pages)
+    assert [p.id for p in lines] == ["2026-01|rent||UAH", "2026-01|food||UAH", "2026-02|food||UAH"]
+
+
+def test_read_plan_refuses_a_monthly_budget_row_with_an_empty_category(tmp_path, monkeypatch):
+    with pytest.raises(ValueError, match="1 Monthly Budget row") as caught:
+        _hybrid(tmp_path, monkeypatch, [_mb_page("m-jan", "", "", "UAH", 120)])
+    assert "mb-page" not in str(caught.value)
+
+
+def test_read_plan_refuses_a_monthly_budget_row_with_an_empty_currency(tmp_path, monkeypatch):
+    with pytest.raises(ValueError, match="1 Monthly Budget row") as caught:
+        _hybrid(tmp_path, monkeypatch, [_mb_page("m-jan", "food", "", "", 120)])
+    assert "mb-page" not in str(caught.value)
