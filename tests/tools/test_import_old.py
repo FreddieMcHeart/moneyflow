@@ -85,11 +85,23 @@ _PLAN_PAYLOADS_SOURCE = """class Schema:
     @classmethod
     def load(cls, path):
         return cls()
+
+    def database_id(self, name):
+        return name
 """
 
-_PLAN_CLIENT_SOURCE = """class NotionClient:
+_PLAN_CLIENT_SOURCE = """PAGES = {pages!r}
+
+
+class NotionClient:
     def __init__(self, token):
         self.token = token
+
+    def query_database(self, database_id):
+        return list(PAGES.get(database_id, ()))
+"""
+
+_NOTION_MODEL_SOURCE = """NO_SUBCATEGORY = "<none>"
 """
 
 _PLAN_READ_SOURCE = """from decimal import Decimal
@@ -776,7 +788,7 @@ _GRID = (
 )
 
 
-def _plan_repo(tmp_path: Path, rows=_GRID, token: str = "tok-test") -> Path:
+def _plan_repo(tmp_path: Path, rows=_GRID, token: str = "tok-test", pages: dict | None = None) -> Path:
     """A fake old repo whose `planexpand.read.read_grid` returns `rows` for a client built with `token`."""
     repo = _old_repo(tmp_path)
     python = repo / "scripts" / "python"
@@ -784,7 +796,8 @@ def _plan_repo(tmp_path: Path, rows=_GRID, token: str = "tok-test") -> Path:
         (python / package).mkdir()
         (python / package / "__init__.py").write_text("")
     (python / "notionsync" / "payloads.py").write_text(_PLAN_PAYLOADS_SOURCE)
-    (python / "notionsync" / "client.py").write_text(_PLAN_CLIENT_SOURCE)
+    (python / "notionsync" / "client.py").write_text(_PLAN_CLIENT_SOURCE.format(pages=dict(pages or {})))
+    (python / "notionsync" / "model.py").write_text(_NOTION_MODEL_SOURCE)
     (python / "planexpand" / "read.py").write_text(_PLAN_READ_SOURCE.format(rows=tuple(rows), token=token))
     return repo
 
@@ -837,3 +850,95 @@ def test_run_imports_the_plan_lines_and_a_second_run_changes_nothing(conn, tmp_p
     assert "plan_lines: 2 inserted, 0 updated, 0 deleted, 0 unchanged" in capsys.readouterr().out
     assert run(repo, conn)["plan_lines"] == (0, 0, 0, 2)
     assert "skipped" not in capsys.readouterr().out
+
+
+def _month_page(page_id: str, title: str) -> dict:
+    return {"id": page_id, "properties": {"Name": {"type": "title", "title": [{"plain_text": title}]}}}
+
+
+def _mb_page(month_page_id, category, subcategory, currency, plan, *, rich_currency: bool = False) -> dict:
+    """A Monthly Budget page in the Notion API shape the hybrid plan reader consumes."""
+    if rich_currency:
+        cur = {"type": "rich_text", "rich_text": [{"plain_text": currency}]}
+    else:
+        cur = {"type": "select", "select": {"name": currency}}
+    return {
+        "id": "mb-page",
+        "properties": {
+            "Month": {"type": "relation", "relation": [] if month_page_id is None else [{"id": month_page_id}]},
+            "Category": {"type": "select", "select": {"name": category}},
+            "Subcategory": {"type": "rich_text", "rich_text": [{"plain_text": subcategory}]},
+            "Currency": cur,
+            "Plan": {"type": "number", "number": plan},
+        },
+    }
+
+
+_MONTHS = (_month_page("m-jan", "2026-01"), _month_page("m-feb", "2026-02"))
+_HYBRID_GRID = (
+    ("2026-01", "food", None, "UAH", Decimal("100.00"), "template", None),
+    ("2026-01", "rent", None, "UAH", Decimal("900.00"), "template", None),
+    ("2026-02", "food", None, "UAH", Decimal("110.00"), "template", None),
+)
+
+
+def _hybrid(tmp_path, monkeypatch, mb_pages, months=_MONTHS, rows=_HYBRID_GRID):
+    monkeypatch.setenv("NOTION_TOKEN", "tok-test")
+    pages = {"months": list(months), "monthly_budget": list(mb_pages)}
+    return read_plan(_plan_repo(tmp_path, rows=rows, pages=pages))
+
+
+def test_read_plan_takes_a_month_from_monthly_budget_and_a_later_month_from_the_grid(tmp_path, monkeypatch):
+    lines = _hybrid(tmp_path, monkeypatch, [_mb_page("m-jan", "food", "", "UAH", 120)])
+    assert [(p.id, p.amount, p.source, p.handed_over) for p in lines] == [
+        ("2026-01|food||UAH", Decimal("120"), "monthly_budget", True),
+        ("2026-02|food||UAH", Decimal("110.00"), "template", False),
+    ]
+
+
+def test_read_plan_drops_a_grid_key_of_a_monthly_budget_month_that_monthly_budget_lacks(tmp_path, monkeypatch):
+    lines = _hybrid(tmp_path, monkeypatch, [_mb_page("m-jan", "food", "", "UAH", 120)])
+    assert "2026-01|rent||UAH" not in [p.id for p in lines]
+
+
+def test_read_plan_reads_the_no_subcategory_marker_as_empty_and_a_select_currency(tmp_path, monkeypatch):
+    lines = _hybrid(tmp_path, monkeypatch, [_mb_page("m-jan", "tax", "<none>", "UAH", 120)])
+    assert (lines[0].id, lines[0].subcategory, lines[0].currency) == ("2026-01|tax||UAH", "", "UAH")
+
+
+def test_read_plan_reads_a_rich_text_currency_and_keeps_a_real_subcategory(tmp_path, monkeypatch):
+    lines = _hybrid(tmp_path, monkeypatch, [_mb_page("m-jan", "food", "cafe", "USD", 5, rich_currency=True)])
+    assert (lines[0].id, lines[0].subcategory, lines[0].currency) == ("2026-01|food|cafe|USD", "cafe", "USD")
+
+
+def test_read_plan_skips_a_row_without_a_plan_and_keeps_a_plan_of_zero(tmp_path, monkeypatch):
+    pages = [
+        _mb_page("m-jan", "food", "", "UAH", None),
+        _mb_page("m-jan", "rent", "", "UAH", 0),
+    ]
+    lines = _hybrid(tmp_path, monkeypatch, pages)
+    assert [(p.id, p.amount) for p in lines if p.source == "monthly_budget"] == [("2026-01|rent||UAH", Decimal("0"))]
+
+
+def test_read_plan_refuses_a_monthly_budget_row_with_no_month_without_naming_a_page(tmp_path, monkeypatch):
+    with pytest.raises(ValueError, match="1 Monthly Budget row") as caught:
+        _hybrid(tmp_path, monkeypatch, [_mb_page(None, "food", "", "UAH", 120)])
+    assert "mb-page" not in str(caught.value) and "tok-test" not in str(caught.value)
+
+
+def test_read_plan_refuses_a_monthly_budget_row_pointing_at_a_non_month_title(tmp_path, monkeypatch):
+    months = (*_MONTHS, _month_page("m-odd", "Archive"))
+    with pytest.raises(ValueError, match="1 Monthly Budget row") as caught:
+        _hybrid(tmp_path, monkeypatch, [_mb_page("m-odd", "food", "", "UAH", 120)], months=months)
+    assert "m-odd" not in str(caught.value)
+
+
+def test_read_plan_refuses_two_monthly_budget_pages_on_one_key(tmp_path, monkeypatch):
+    pages = [_mb_page("m-jan", "food", "", "UAH", 120), _mb_page("m-jan", "food", "", "UAH", 130)]
+    with pytest.raises(ValueError, match=r"duplicate Monthly Budget key: 2026-01\|food\|\|UAH"):
+        _hybrid(tmp_path, monkeypatch, pages)
+
+
+def test_read_plan_without_a_token_returns_none_even_when_monthly_budget_has_pages(tmp_path):
+    pages = {"months": list(_MONTHS), "monthly_budget": [_mb_page("m-jan", "food", "", "UAH", 120)]}
+    assert read_plan(_plan_repo(tmp_path, pages=pages)) is None
