@@ -1,0 +1,56 @@
+{
+  "name": "Months",
+  "parameters": [],
+  "cards": [
+    {
+      "name": "Overview",
+      "sql": "select m.budget_month as \"Month\", round(m.income, 1) as \"Income ₴\", (select sum(p.amount) from plan_lines p where p.budget_month = m.budget_month and p.currency = 'UAH') as \"Total plan ₴\", round(-m.total_actual, 1) as \"Spent ₴\", round(m.income, 1) - round(-m.total_actual, 1) as \"Balance ₴\", m.days_left as \"Days left\", m.cycle_open as \"Cycle open\" from month_summaries m where m.currency = 'UAH' order by \"Month\" desc",
+      "display": "table",
+      "visualization_settings": {
+        "column_settings": {
+          "[\"name\",\"Income ₴\"]": {
+            "number_style": "currency",
+            "currency": "UAH"
+          },
+          "[\"name\",\"Total plan ₴\"]": {
+            "number_style": "currency",
+            "currency": "UAH"
+          },
+          "[\"name\",\"Spent ₴\"]": {
+            "number_style": "currency",
+            "currency": "UAH"
+          },
+          "[\"name\",\"Balance ₴\"]": {
+            "number_style": "currency",
+            "currency": "UAH"
+          }
+        }
+      },
+      "row": 0,
+      "col": 0,
+      "size_x": 24,
+      "size_y": 8
+    },
+    {
+      "name": "History by month",
+      "sql": "with actual as (select budget_month, category, coalesce(subcategory, '') as subcategory, currency, sum(case when direction in ('expense', 'reimbursement') then -amount end) as actual, count(distinct transaction_id) as n from ledger_entries where status = 'kept' and direction <> 'income' and category is not null and budget_month is not null group by budget_month, category, coalesce(subcategory, ''), currency), plan as (select budget_month, category, coalesce(subcategory, '') as subcategory, currency, sum(amount) as plan from plan_lines group by budget_month, category, coalesce(subcategory, ''), currency), joined as (select coalesce(p.budget_month, a.budget_month) as budget_month, coalesce(p.category, a.category) as category, coalesce(p.subcategory, a.subcategory) as subcategory, coalesce(p.currency, a.currency) as currency, p.plan, a.actual, coalesce(a.n, 0) as n from plan p full outer join actual a on p.budget_month = a.budget_month and p.category = a.category and p.subcategory = a.subcategory and p.currency = a.currency) select budget_month as \"Month\", category as \"Category\", subcategory as \"Subcategory\", currency as \"Currency\", plan as \"Plan\", actual as \"Actual\", n as \"Transactions\" from joined where budget_month not in (select budget_month from month_summaries where cycle_open) order by \"Month\", \"Category\", \"Subcategory\"",
+      "display": "table",
+      "visualization_settings": {
+        "column_settings": {
+          "[\"name\",\"Plan\"]": {
+            "number_style": "decimal",
+            "decimals": 2
+          },
+          "[\"name\",\"Actual\"]": {
+            "number_style": "decimal",
+            "decimals": 2
+          }
+        }
+      },
+      "row": 8,
+      "col": 0,
+      "size_x": 24,
+      "size_y": 8
+    }
+  ]
+}
