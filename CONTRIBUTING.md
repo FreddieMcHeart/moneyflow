@@ -8,7 +8,7 @@ Follow [AGENTS.md](AGENTS.md): `uv sync`, a local Postgres, and `MONEYFLOW_TEST_
 
 ## Before you open a PR
 
-- Run `./check.sh`. It must pass. CI runs the same script.
+- Run `./check.sh`. It must pass. CI runs the same script, split into two jobs.
 - Add or update tests for any behaviour change.
 - Don't commit real financial data: no real amounts, account ids, merchant names or descriptions. Use synthetic fixtures.
 

@@ -97,6 +97,12 @@ def test_a_leg_outside_the_counterpartys_coverage_is_left_alone():
     assert run(inp) == {}
 
 
+@pytest.mark.parametrize("day", [10, 20])
+def test_a_leg_on_the_first_or_last_covered_day_is_detected(day):
+    inp = world(*pair(day=day), windows={"his": (10, 20), "hers": (1, 28)})
+    assert run(inp) == PAIR
+
+
 def test_coverage_is_a_union_so_one_empty_account_does_not_disable_detection():
     accounts = ACCOUNTS + (acct("his-empty", "owner_a"),)
     assert run(world(*pair(), accounts=accounts)) == PAIR

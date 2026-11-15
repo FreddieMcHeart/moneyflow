@@ -5,8 +5,9 @@ on:
   pull_request:
 
 jobs:
-  check:
+  gates:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     services:
       postgres:
         image: postgres:16
@@ -42,5 +43,47 @@ jobs:
           fetch_tool mutator a5a0cb803b66e0cdb8bf471b3b08af701d424a41
       - name: Sync dev environment
         run: uv sync
-      - name: Quality gates
-        run: ./check.sh
+      - name: Quality gates 1-4
+        run: ./check.sh fast
+
+  mutation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: mf
+          POSTGRES_DB: moneyflow_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      MONEYFLOW_TEST_DATABASE_URL: postgresql://postgres:mf@localhost:5432/moneyflow_test
+      UB_TOOLS: ${{ github.workspace }}/../ub-tools
+      PYTHONUNBUFFERED: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - name: Install Python 3.12
+        run: uv python install 3.12
+      - name: Fetch ub tools (crapper, dryer, mutator)
+        run: |
+          # The repos have no tags: pinned by full commit sha.
+          fetch_tool() {
+            git init -q "$UB_TOOLS/$1"
+            git -C "$UB_TOOLS/$1" fetch -q --depth 1 "https://github.com/unclebob/$1" "$2"
+            git -C "$UB_TOOLS/$1" checkout -q FETCH_HEAD
+          }
+          mkdir -p "$UB_TOOLS"
+          fetch_tool crapper 6fd92c4c9bcc56efb64a2f8743d5a2993bcfd42d
+          fetch_tool dryer 66ff6d21a42c04afcad89c78a80066176d1294b0
+          fetch_tool mutator a5a0cb803b66e0cdb8bf471b3b08af701d424a41
+      - name: Sync dev environment
+        run: uv sync
+      - name: Mutation gate
+        run: ./check.sh mutation
