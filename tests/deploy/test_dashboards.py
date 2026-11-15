@@ -14,13 +14,23 @@ from tests.core._builders import TODAY, account, attribute_ruling, owner, reimbu
 
 DIR = Path(__file__).resolve().parents[2] / "deploy" / "metabase" / "dashboards"
 FILES = sorted(DIR.glob("*.json"))
-CARD_KEYS = {"name", "sql", "display", "visualization_settings", "row", "col", "size_x", "size_y"}
+LAYOUT_KEYS = {"row", "col", "size_x", "size_y"}
+CARD_KEYS = {"sql": {"name", "sql", "display", "visualization_settings"},
+             "pivot": {"name", "pivot", "display", "visualization_settings"}}  # plus LAYOUT_KEYS on a dashboard; on_dashboard optional
 FORBIDDEN = re.compile(r"\b(insert|update|delete|create|drop|alter)\b", re.IGNORECASE)
 OPTIONAL = re.compile(r"\[\[.*?\]\]", re.DOTALL)  # Metabase drops an optional clause whose variable is unset
 
 
 def _cards():
     return [(f.name, c) for f in FILES for c in json.loads(f.read_text())["cards"]]
+
+
+def _sql_cards():
+    return [(f, c) for f, c in _cards() if "sql" in c]
+
+
+def _on_dashboard(card):
+    return card.get("on_dashboard", True)
 
 
 def test_exactly_three_dashboards():
@@ -36,14 +46,20 @@ def test_format(path):
     names = [c["name"] for c in data["cards"]]
     assert len(names) == len(set(names))
     for card in data["cards"]:
-        assert set(card) == CARD_KEYS
-        assert all(isinstance(card[k], str) and card[k] for k in ("name", "sql", "display"))
+        kinds = [k for k in CARD_KEYS if k in card]
+        assert len(kinds) == 1, card["name"]  # exactly one of sql or pivot
+        expected = CARD_KEYS[kinds[0]] | (LAYOUT_KEYS if _on_dashboard(card) else {"on_dashboard"})
+        assert set(card) - {"on_dashboard"} == expected - {"on_dashboard"} and ("on_dashboard" not in card or card["on_dashboard"] is False)
+        assert all(isinstance(card[k], str) and card[k] for k in ("name", "display"))
         assert isinstance(card["visualization_settings"], dict)
-        assert all(isinstance(card[k], int) and card[k] >= 0 for k in ("row", "col", "size_x", "size_y"))
+        if _on_dashboard(card):
+            assert all(isinstance(card[k], int) and card[k] >= 0 for k in LAYOUT_KEYS)
+        if "sql" in card:
+            assert isinstance(card["sql"], str) and card["sql"]
 
 
 def test_sql_has_no_write_words():
-    for _, card in _cards():
+    for _, card in _sql_cards():
         assert not FORBIDDEN.search(card["sql"]), card["name"]
 
 
@@ -65,7 +81,7 @@ def _plan(month, category, amount, subcategory="", currency="UAH"):
 OPEN, CLOSED = "2026-02", "2026-01"
 
 
-def _seed(conn):
+def _seed(conn, extra_plan=()):
     db.replace_imported(
         conn,
         owners=(owner(),),
@@ -92,7 +108,7 @@ def _seed(conn):
         categories=("food", "fun", "salary", "transport", "rent"), people=(), fx_rates=(),
         plan_lines=(
             _plan(CLOSED, "food", "80.00"), _plan(CLOSED, "fun", "30.00"),
-            _plan(OPEN, "food", "100.00"), _plan(OPEN, "fun", "50.00"), _plan(OPEN, "rent", "500.00"),
+            _plan(OPEN, "food", "100.00"), _plan(OPEN, "fun", "50.00"), _plan(OPEN, "rent", "500.00"), *extra_plan,
         ))
     rebuild(conn, today=TODAY)
 
@@ -110,7 +126,7 @@ def _run(conn, sql):
     return _run_cols(conn, sql)[1]
 
 
-@pytest.mark.parametrize(("file", "card"), _cards(), ids=lambda v: v if isinstance(v, str) else v["name"])
+@pytest.mark.parametrize(("file", "card"), _sql_cards(), ids=lambda v: v if isinstance(v, str) else v["name"])
 def test_card_sql_runs_read_only_and_returns_rows(conn, file, card):
     _seed(conn)
     assert _run(conn, card["sql"])
@@ -123,7 +139,7 @@ def test_read_only_run_refuses_writes(conn):
 
 
 def _card(file, name):
-    found = [c for f, c in _cards() if f == file and c["name"] == name]
+    found = [c for f, c in _sql_cards() if f == file and c["name"] == name]
     assert found, f"no card {name!r} in {file}"
     return found[0]
 
@@ -132,7 +148,7 @@ def _card(file, name):
 DEC = {"number_style": "decimal", "decimals": 2}
 UAH = {"number_style": "currency", "currency": "UAH"}
 CONTRACT = [
-    ("this-cycle.json", "This cycle", ["Category", "Subcategory", "Currency", "Plan", "Actual", "Transactions"],
+    ("this-cycle.json", "This cycle (rows)", ["Category", "Subcategory", "Currency", "Plan", "Actual", "Transactions"],
      {"Plan": DEC, "Actual": DEC}),
     ("this-cycle.json", "Where the money went", ["Category", "Actual"], {"Actual": UAH}),
     ("months.json", "Overview", ["Month", "Income ₴", "Total plan ₴", "Spent ₴", "Balance ₴", "Days left", "Cycle open"],
@@ -170,16 +186,47 @@ def test_display_and_layout():
         cards = [c for f, c in _cards() if f == dashboard]
         row = 0
         for card in cards:
-            pie = card["name"] == "Where the money went"
-            assert card["display"] == ("pie" if pie else "table")
-            assert (card["row"], card["col"], card["size_x"], card["size_y"]) == (row, 0, 24, 6 if pie else 8)
-            assert card["visualization_settings"].get("pie.show_legend") is (True if pie else None)
+            if not _on_dashboard(card):
+                assert card["display"] == "table" and not LAYOUT_KEYS & set(card), card["name"]
+                continue
+            display = {"Where the money went": "pie", "This cycle": "pivot"}.get(card["name"], "table")
+            assert card["display"] == display, card["name"]
+            assert (card["row"], card["col"], card["size_x"], card["size_y"]) == (row, 0, 24, 6 if display == "pie" else 8)
+            assert card["visualization_settings"].get("pie.show_legend") is (True if display == "pie" else None)
             row += card["size_y"]
     assert [json.loads(f.read_text())["parameters"] for f in FILES if f.name != "transactions.json"] == [[], []]
 
 
+def _this_cycle_file():
+    return json.loads((DIR / "this-cycle.json").read_text())
+
+
+def test_this_cycle_is_a_pivot_over_its_rows_card():
+    cards = _this_cycle_file()["cards"]
+    assert [(c["name"], _on_dashboard(c)) for c in cards] == [("This cycle (rows)", False), ("This cycle", True), ("Where the money went", True)]
+    rows, pivot, pie = cards
+    assert "sql" in rows and "pivot" not in rows and rows["display"] == "table"
+    assert "pivot" in pivot and "sql" not in pivot and pivot["display"] == "pivot"
+    assert pivot["pivot"] == {"source": "This cycle (rows)", "rows": ["Category", "Subcategory"], "columns": ["Currency"],
+                              "values": ["Plan", "Actual", "Transactions"]}
+    assert (pivot["row"], pivot["size_y"], pie["row"], pie["size_y"]) == (0, 8, 8, 6)
+
+
+def test_this_cycle_pivot_settings_set_titles_formats_and_no_row_totals():
+    pivot = _this_cycle_file()["cards"][1]
+    settings = pivot["visualization_settings"]
+    assert settings["pivot.show_row_totals"] is False  # no total crosses currencies
+    assert "pivot_table.column_split" not in settings  # the provisioner builds it
+    assert settings["column_settings"] == {
+        '["name","sum"]': {"column_title": "Plan", "number_style": "decimal", "decimals": 2},
+        '["name","sum_2"]': {"column_title": "Actual", "number_style": "decimal", "decimals": 2},
+        '["name","sum_3"]': {"column_title": "Transactions"},
+    }
+    assert [v for v in pivot["pivot"]["values"]] == [CONTRACT[0][2][i] for i in (3, 4, 5)]  # titles match the rows card's columns
+
+
 def _this_cycle(conn):
-    cols, rows = _run_cols(conn, _card("this-cycle.json", "This cycle")["sql"])
+    cols, rows = _run_cols(conn, _card("this-cycle.json", "This cycle (rows)")["sql"])
     return {(r["Category"], r["Subcategory"], r["Currency"]): r for r in rows}
 
 
@@ -196,7 +243,7 @@ def test_this_cycle_rows_are_the_union_of_plan_and_spending(conn):
     assert got[("fun", "", "UAH")]["Actual"] == Decimal("10.00")
 
 
-@pytest.mark.parametrize(("file", "name"), [("this-cycle.json", "This cycle"), ("months.json", "History by month")])
+@pytest.mark.parametrize(("file", "name"), [("this-cycle.json", "This cycle (rows)"), ("months.json", "History by month")])
 def test_plan_with_empty_subcategory_and_spend_with_null_merge_into_one_row(conn, file, name):
     """plan_lines stores '' where ledger_entries stores null; the join must treat them as the same key."""
     _seed(conn)
@@ -264,7 +311,7 @@ def _sorted_by(rows, key, reverse=False):
 def test_sort_order(conn):
     _seed(conn)
     run = lambda f, n: _run(conn, _card(f, n)["sql"])  # noqa: E731
-    actuals = [r["Actual"] for r in run("this-cycle.json", "This cycle")]
+    actuals = [r["Actual"] for r in run("this-cycle.json", "This cycle (rows)")]
     assert actuals == [Decimal("18.00"), Decimal("15.00"), Decimal("10.00"), None]
     assert [r["Actual"] for r in run("this-cycle.json", "Where the money went")] == [Decimal("18.00"), Decimal("15.00"), Decimal("10.00")]
     assert [r["Month"] for r in run("months.json", "Overview")] == [OPEN, CLOSED]
@@ -306,3 +353,27 @@ def test_broken_column_name_in_a_card_goes_red(conn):
     sql = _card("months.json", "Overview")["sql"].replace("days_left", "days_leftt")
     with pytest.raises(Exception, match="days_leftt"):
         _run(conn, sql)
+
+
+def test_mixed_currency_category_gives_one_rows_card_row_per_currency_and_the_pivot_splits_currency_by_column(conn):
+    """The data side of "no total crosses currencies": a fabricated category with a UAH and a USD key. The pivot totals
+    themselves are checked live (spec section 6, After T5)."""
+    from tools.metabase.api import _card_body
+
+    _seed(conn, extra_plan=(_plan(OPEN, "rent", "20.00", currency="USD"),))
+    cols, rows = _run_cols(conn, _card("this-cycle.json", "This cycle (rows)")["sql"])
+    rent = {r["Currency"]: r for r in rows if r["Category"] == "rent"}
+    assert set(rent) == {"UAH", "USD"} and len([r for r in rows if r["Category"] == "rent"]) == 2
+    assert (rent["UAH"]["Plan"], rent["USD"]["Plan"]) == (Decimal("500.00"), Decimal("20.00"))
+    # the shape the provisioner sends: Currency is a column split, never a row, and no row totals are shown
+    pivot = _this_cycle_file()["cards"][1]
+    metadata = [{"name": c, "base_type": "type/Text"} for c in cols]
+    body = _card_body(pivot, 1, 2, None, source=(9, metadata))
+    split = body["visualization_settings"]["pivot_table.column_split"]
+    assert split["columns"] == ["Currency"] and "Currency" not in split["rows"]
+    assert body["visualization_settings"]["pivot.show_row_totals"] is False
+    # computed subtotals per (Category, Currency): the mixed category has two, and none adds UAH to USD
+    totals = {}
+    for r in rows:
+        totals[(r["Category"], r["Currency"])] = totals.get((r["Category"], r["Currency"]), Decimal(0)) + (r["Plan"] or 0)
+    assert totals[("rent", "UAH")] == Decimal("500.00") and totals[("rent", "USD")] == Decimal("20.00")
