@@ -145,11 +145,12 @@ def _card(file, name):
 
 
 # (file, card, columns in order, money format per column)
-DEC = {"number_style": "decimal", "decimals": 2}
-UAH = {"number_style": "currency", "currency": "UAH"}
+DEC = {"number_style": "decimal", "decimals": 0}
+UAH = {"number_style": "currency", "currency": "UAH", "currency_style": "symbol", "currency_in_header": False, "decimals": 0}
 CONTRACT = [
     ("this-cycle.json", "This cycle (rows)", ["Category", "Subcategory", "Currency", "Plan", "Actual", "Transactions"],
      {"Plan": DEC, "Actual": DEC}),
+    ("this-cycle.json", "Plan vs Actual", ["Category", "Plan", "Actual"], {"Plan": UAH, "Actual": UAH}),
     ("this-cycle.json", "Where the money went", ["Category", "Actual"], {"Actual": UAH}),
     ("months.json", "Overview", ["Month", "Income ₴", "Total plan ₴", "Spent ₴", "Balance ₴", "Days left", "Cycle open"],
      {"Income ₴": UAH, "Total plan ₴": UAH, "Spent ₴": UAH, "Balance ₴": UAH}),
@@ -189,10 +190,12 @@ def test_display_and_layout():
             if not _on_dashboard(card):
                 assert card["display"] == "table" and not LAYOUT_KEYS & set(card), card["name"]
                 continue
-            display = {"Where the money went": "pie", "This cycle": "pivot"}.get(card["name"], "table")
+            display = {"Where the money went": "pie", "By category": "pivot", "Plan vs Actual": "row"}.get(card["name"], "table")
+            size_y = {"Plan vs Actual": 10, "By category": 8, "Where the money went": 6}.get(card["name"], 8)
             assert card["display"] == display, card["name"]
-            assert (card["row"], card["col"], card["size_x"], card["size_y"]) == (row, 0, 24, 6 if display == "pie" else 8)
+            assert (card["row"], card["col"], card["size_x"], card["size_y"]) == (row, 0, 24, size_y), card["name"]
             assert card["visualization_settings"].get("pie.show_legend") is (True if display == "pie" else None)
+            assert card["visualization_settings"].get("pie.slice_threshold") == (0 if display == "pie" else None), card["name"]
             row += card["size_y"]
     assert [json.loads(f.read_text())["parameters"] for f in FILES if f.name != "transactions.json"] == [[], []]
 
@@ -201,28 +204,43 @@ def _this_cycle_file():
     return json.loads((DIR / "this-cycle.json").read_text())
 
 
+def _this_cycle_card(name):
+    found = [c for c in _this_cycle_file()["cards"] if c["name"] == name]
+    assert len(found) == 1, name
+    return found[0]
+
+
 def test_this_cycle_is_a_pivot_over_its_rows_card():
     cards = _this_cycle_file()["cards"]
-    assert [(c["name"], _on_dashboard(c)) for c in cards] == [("This cycle (rows)", False), ("This cycle", True), ("Where the money went", True)]
-    rows, pivot, pie = cards
+    assert [(c["name"], _on_dashboard(c)) for c in cards] == [
+        ("This cycle (rows)", False), ("Plan vs Actual", True), ("By category", True), ("Where the money went", True)]
+    rows, pivot, pie = (_this_cycle_card(n) for n in ("This cycle (rows)", "By category", "Where the money went"))
     assert "sql" in rows and "pivot" not in rows and rows["display"] == "table"
     assert "pivot" in pivot and "sql" not in pivot and pivot["display"] == "pivot"
     assert pivot["pivot"] == {"source": "This cycle (rows)", "rows": ["Category", "Subcategory"], "columns": ["Currency"],
                               "values": ["Plan", "Actual", "Transactions"]}
-    assert (pivot["row"], pivot["size_y"], pie["row"], pie["size_y"]) == (0, 8, 8, 6)
+    assert (pivot["row"], pivot["size_y"], pie["row"], pie["size_y"]) == (10, 8, 18, 6)
 
 
 def test_this_cycle_pivot_settings_set_titles_formats_and_no_row_totals():
-    pivot = _this_cycle_file()["cards"][1]
+    pivot = _this_cycle_card("By category")
     settings = pivot["visualization_settings"]
     assert settings["pivot.show_row_totals"] is False  # no total crosses currencies
     assert "pivot_table.column_split" not in settings  # the provisioner builds it
+    assert settings["pivot_table.collapsed_rows"] == {"value": ["1"], "rows": ["Category", "Subcategory"]}
     assert settings["column_settings"] == {
-        '["name","sum"]': {"column_title": "Plan", "number_style": "decimal", "decimals": 2},
-        '["name","sum_2"]': {"column_title": "Actual", "number_style": "decimal", "decimals": 2},
+        '["name","sum"]': {"column_title": "Plan", **DEC},
+        '["name","sum_2"]': {"column_title": "Actual", **DEC},
         '["name","sum_3"]': {"column_title": "Transactions"},
     }
     assert [v for v in pivot["pivot"]["values"]] == [CONTRACT[0][2][i] for i in (3, 4, 5)]  # titles match the rows card's columns
+
+
+def test_plan_vs_actual_is_a_row_chart_of_plan_and_actual_by_category():
+    card = _this_cycle_card("Plan vs Actual")
+    settings = card["visualization_settings"]
+    assert settings["graph.dimensions"] == ["Category"] and settings["graph.metrics"] == ["Plan", "Actual"]
+    assert card["display"] == "row" and _on_dashboard(card)
 
 
 def _this_cycle(conn):
@@ -366,7 +384,7 @@ def test_mixed_currency_category_gives_one_rows_card_row_per_currency_and_the_pi
     assert set(rent) == {"UAH", "USD"} and len([r for r in rows if r["Category"] == "rent"]) == 2
     assert (rent["UAH"]["Plan"], rent["USD"]["Plan"]) == (Decimal("500.00"), Decimal("20.00"))
     # the shape the provisioner sends: Currency is a column split, never a row, and no row totals are shown
-    pivot = _this_cycle_file()["cards"][1]
+    pivot = _this_cycle_card("By category")
     metadata = [{"name": c, "base_type": "type/Text"} for c in cols]
     body = _card_body(pivot, 1, 2, None, source=(9, metadata))
     split = body["visualization_settings"]["pivot_table.column_split"]
@@ -377,3 +395,32 @@ def test_mixed_currency_category_gives_one_rows_card_row_per_currency_and_the_pi
     for r in rows:
         totals[(r["Category"], r["Currency"])] = totals.get((r["Category"], r["Currency"]), Decimal(0)) + (r["Plan"] or 0)
     assert totals[("rent", "UAH")] == Decimal("500.00") and totals[("rent", "USD")] == Decimal("20.00")
+
+
+def _plan_vs_actual(conn):
+    return {r["Category"]: (r["Plan"], r["Actual"]) for r in _run(conn, _card("this-cycle.json", "Plan vs Actual")["sql"])}
+
+
+def _uah_rows_summed_by_category(conn):
+    sums = {}
+    for (category, _, currency), r in _this_cycle(conn).items():
+        if currency != "UAH":
+            continue
+        plan, actual = sums.get(category, (Decimal(0), Decimal(0)))
+        sums[category] = (plan + (r["Plan"] or 0), actual + (r["Actual"] or 0))
+    return sums
+
+
+def test_plan_vs_actual_equals_the_uah_rows_summed_by_category(conn):
+    _seed(conn)
+    got = _plan_vs_actual(conn)
+    assert got == _uah_rows_summed_by_category(conn)
+    assert got == {"food": (Decimal("100.00"), Decimal("18.00")), "fun": (Decimal("50.00"), Decimal("10.00")),
+                   "rent": (Decimal("500.00"), Decimal("0")), "transport": (Decimal("0"), Decimal("15.00"))}
+
+
+def test_plan_vs_actual_does_not_show_usd(conn):
+    _seed(conn, extra_plan=(_plan(OPEN, "rent", "20.00", currency="USD"), _plan(OPEN, "travel", "70.00", currency="USD")))
+    got = _plan_vs_actual(conn)
+    assert got == _uah_rows_summed_by_category(conn)
+    assert got["rent"] == (Decimal("500.00"), Decimal("0")) and "travel" not in got

@@ -19,7 +19,7 @@
         "column_settings": {
           "[\"name\",\"Amount\"]": {
             "number_style": "decimal",
-            "decimals": 2
+            "decimals": 0
           }
         }
       },
@@ -36,7 +36,7 @@
         "column_settings": {
           "[\"name\",\"Amount\"]": {
             "number_style": "decimal",
-            "decimals": 2
+            "decimals": 0
           }
         }
       },
