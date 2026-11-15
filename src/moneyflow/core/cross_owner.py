@@ -91,7 +91,7 @@ def _recipient(tx: Transaction, ctx: _Context) -> str | None:
     mine = _payer(tx, ctx)
     for other, needles in ctx.strings.items():
         if other != mine and _names(tx, needles):
-            # stop at the first owner named, covered or not: two names must not make two transfers
+            # stop at the first owner named, covered or not: two names must never make two transfers
             return other if _covered(ctx.coverage, ctx.pool.get(other, frozenset()), tx.date) else None
     return None
 
