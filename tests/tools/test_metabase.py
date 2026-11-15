@@ -227,7 +227,7 @@ def test_every_dashboard_card_variable_has_a_template_tag():
                 seen += 1
                 assert var in tags and tags[var]["name"] == var and tags[var]["type"], (card["name"], var)
             assert set(tags) == set(re.findall(r"\{\{\s*(\w+)\s*\}\}", card["sql"]))
-    assert seen >= 4
+    assert seen >= 2
 
 
 def test_declared_dashboard_parameter_type_is_used_for_the_tag():

@@ -1,13 +1,49 @@
 {
   "name": "Transactions",
-  "parameters": [{"name": "budget_month", "type": "text"}, {"name": "category", "type": "text"}],
+  "parameters": [
+    {
+      "name": "budget_month",
+      "type": "text"
+    },
+    {
+      "name": "category",
+      "type": "text"
+    }
+  ],
   "cards": [
     {
-      "name": "Ledger entries",
-      "sql": "select date, budget_month, account_id, category, subcategory, amount, currency, amount_uah, status, transaction_id, part from ledger_entries where true [[and budget_month = {{budget_month}}]] [[and category = {{category}}]] order by date desc, transaction_id, part",
+      "name": "Transactions",
+      "sql": "select le.date as \"Date\", t.description as \"Description\", le.amount as \"Amount\", le.currency as \"Currency\", a.name as \"Account\", le.category as \"Category\", le.subcategory as \"Subcategory\", le.status as \"Status\" from ledger_entries le left join transactions t on t.id = le.transaction_id left join accounts a on a.id = le.account_id where true [[and le.budget_month = {{budget_month}}]] [[and le.category = {{category}}]] order by \"Date\" desc, le.transaction_id, le.part limit 2000",
       "display": "table",
-      "visualization_settings": {},
-      "row": 0, "col": 0, "size_x": 24, "size_y": 14
+      "visualization_settings": {
+        "column_settings": {
+          "[\"name\",\"Amount\"]": {
+            "number_style": "decimal",
+            "decimals": 2
+          }
+        }
+      },
+      "row": 0,
+      "col": 0,
+      "size_x": 24,
+      "size_y": 8
+    },
+    {
+      "name": "To review",
+      "sql": "select le.date as \"Date\", t.description as \"Description\", le.amount as \"Amount\", le.currency as \"Currency\", a.name as \"Account\", t.mcc as \"MCC\", le.category as \"Category\", le.subcategory as \"Subcategory\" from ledger_entries le left join transactions t on t.id = le.transaction_id left join accounts a on a.id = le.account_id where le.status = 'unresolved' order by \"Date\" desc, le.transaction_id, le.part",
+      "display": "table",
+      "visualization_settings": {
+        "column_settings": {
+          "[\"name\",\"Amount\"]": {
+            "number_style": "decimal",
+            "decimals": 2
+          }
+        }
+      },
+      "row": 8,
+      "col": 0,
+      "size_x": 24,
+      "size_y": 8
     }
   ]
 }
