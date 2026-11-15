@@ -4,7 +4,7 @@
   "cards": [
     {
       "name": "Overview",
-      "sql": "select m.budget_month as \"Month\", round(m.income, 1) as \"Income ₴\", (select sum(p.amount) from plan_lines p where p.budget_month = m.budget_month and p.currency = 'UAH') as \"Total plan ₴\", round(-m.total_actual, 1) as \"Spent ₴\", round(m.income, 1) - round(-m.total_actual, 1) as \"Balance ₴\", m.days_left as \"Days left\", m.cycle_open as \"Cycle open\" from month_summaries m where m.currency = 'UAH' order by \"Month\" desc",
+      "sql": "select m.budget_month as \"Month\", round(coalesce(i.income_uah, 0), 1) as \"Income ₴\", (select sum(p.amount) from plan_lines p where p.budget_month = m.budget_month and p.currency = 'UAH') as \"Total plan ₴\", round(-m.total_actual, 1) as \"Spent ₴\", round(coalesce(i.income_uah, 0), 1) - round(-m.total_actual, 1) as \"Balance ₴\", m.days_left as \"Days left\", m.cycle_open as \"Cycle open\" from month_summaries m left join (select l.budget_month, sum(l.amount_uah) as income_uah from ledger_entries l where l.direction = 'income' and l.status in ('kept', 'unresolved') and l.budget_month is not null group by l.budget_month) i on i.budget_month = m.budget_month where m.currency = 'UAH' order by \"Month\" desc",
       "display": "table",
       "visualization_settings": {
         "column_settings": {

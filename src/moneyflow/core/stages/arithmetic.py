@@ -1,6 +1,6 @@
 """Arithmetic: the sign and the UAH value. Expense is negative; income and reimbursement stay positive.
 
-A USD entry converts at the rate of its own day. As in the old `convert_rows`, the bank-positive magnitude is floored
+A USD entry converts at the rate of its own day: an income row at the `official` rate only, any other row at `sell`, else `official`. As in the old `convert_rows`, the bank-positive magnitude is floored
 (to the account's `fx_income_floor_step` for an income row, otherwise to `NON_INCOME_STEP`) and the sign is applied after,
 so an expense of 1009.00 at 41.45 is -41820, never -41825. Entries that are not counted (excluded) are not converted.
 """
@@ -8,8 +8,8 @@ so an expense of 1009.00 at 41.45 is -41820, never -41825. Entries that are not 
 from dataclasses import replace
 from decimal import Decimal
 
-from moneyflow.core.fx import NON_INCOME_STEP, rate_for, to_uah
-from moneyflow.core.model import BuildRefused, Inputs, LedgerEntry
+from moneyflow.core.fx import NON_INCOME_STEP, official_rate_for, rate_for, to_uah
+from moneyflow.core.model import BuildRefused, FxRate, Inputs, LedgerEntry
 
 _CONVERTED = ("kept", "unresolved", "outside_cycle")
 
@@ -32,20 +32,28 @@ def _convert(e: LedgerEntry, rate: tuple[Decimal, str] | None, income_steps: dic
     )
 
 
+def _rate(e: LedgerEntry, fx_rates: tuple[FxRate, ...]) -> tuple[Decimal, str] | None:
+    """An income row converts at the NBU `official` rate only; every other row at `sell`, else `official`."""
+    return official_rate_for(e.date, fx_rates) if e.direction == "income" else rate_for(e.date, fx_rates)
+
+
 def _rates(entries: list[LedgerEntry], inputs: Inputs) -> list[tuple[Decimal, str] | None]:
     """The rate per entry (None for a UAH or an uncounted entry); refuses every entry the rule cannot convert."""
     found: list[tuple[Decimal, str] | None] = []
     missing: list[str] = []
+    missing_income: list[str] = []
     for e in entries:
         if e.status not in _CONVERTED or e.currency == "UAH":
             found.append(None)
             continue
         if e.currency != "USD":
             raise BuildRefused(f"currency {e.currency} has no conversion rule", e.transaction_id)
-        hit = rate_for(e.date, inputs.fx_rates)
+        hit = _rate(e, inputs.fx_rates)
         if hit is None:
-            missing.append(e.transaction_id)
+            (missing_income if e.direction == "income" else missing).append(e.transaction_id)
         found.append(hit)
+    if missing_income:
+        raise BuildRefused(f"no official USD rate for {len(missing_income)} income row(s)", missing_income[0])
     if missing:
         raise BuildRefused(f"no sell or official USD rate for {len(missing)} row(s)", missing[0])
     return found

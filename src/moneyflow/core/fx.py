@@ -26,6 +26,14 @@ def rate_for(day: date, fx_rates: tuple[FxRate, ...]) -> tuple[Decimal, str] | N
     return None
 
 
+def official_rate_for(day: date, fx_rates: tuple[FxRate, ...]) -> tuple[Decimal, str] | None:
+    """The first `official` observation for exactly this day, or None. `sell` and every other kind are never used."""
+    for r in fx_rates:
+        if r.date == day and r.kind == "official":
+            return r.rate, "official"
+    return None
+
+
 def to_uah(amount: Decimal, rate: Decimal, step: Decimal) -> Decimal:
     """`amount * rate` floored toward minus infinity to a multiple of `step`, to two decimal places."""
     # Decimal `//` truncates toward zero, so the floor is spelled out: it differs for a negative value.

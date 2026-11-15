@@ -61,12 +61,13 @@ def _inp(*rates):
 
 RATE_5 = fx_rate(5, "41.4500", "official")
 RATE_6 = fx_rate(6, "41.4537", "sell")
+RATE_6_OFFICIAL = fx_rate(6, "41.4537", "official")  # an income row converts at official only
 
 
 def test_fop_income_floors_to_100():
-    (out,) = arithmetic([_fx_entry(direction="income", amount="6000.00", account_id="fop", day=6)], _inp(RATE_6))
+    (out,) = arithmetic([_fx_entry(direction="income", amount="6000.00", account_id="fop", day=6)], _inp(RATE_6_OFFICIAL))
     assert out.amount_uah == Decimal("248700.00")  # 6000 x 41.4537 = 248722.20
-    assert (out.rate, out.rate_kind) == (Decimal("41.4537"), "sell")
+    assert (out.rate, out.rate_kind) == (Decimal("41.4537"), "official")
 
 
 def test_fop_expense_floors_to_5():
@@ -75,7 +76,7 @@ def test_fop_expense_floors_to_5():
 
 
 def test_other_account_income_floors_to_5():
-    (out,) = arithmetic([_fx_entry(direction="income", amount="1000.00", day=6)], _inp(RATE_6))
+    (out,) = arithmetic([_fx_entry(direction="income", amount="1000.00", day=6)], _inp(RATE_6_OFFICIAL))
     assert out.amount_uah == Decimal("41450.00")
 
 
@@ -128,3 +129,21 @@ def test_excluded_entry_is_not_converted_and_needs_no_rate():
 def test_unknown_currency_refuses():
     with pytest.raises(BuildRefused):
         arithmetic([_fx_entry(currency="EUR")], _inp())
+
+
+def test_usd_income_takes_official_expense_keeps_sell():
+    rates = (fx_rate(5, "41.6000", "sell"), fx_rate(5, "41.3000", "official"))
+    income, expense = arithmetic(
+        [_fx_entry(id="i", direction="income", amount="10.00"), _fx_entry(id="e", direction="expense", amount="10.00")],
+        _inp(*rates),
+    )
+    assert (income.rate_kind, income.rate, income.amount_uah) == ("official", Decimal("41.3000"), Decimal("410.00"))
+    # to_uah floors 416 to 415 first, then the sign is applied
+    assert (expense.rate_kind, expense.rate, expense.amount_uah) == ("sell", Decimal("41.6000"), Decimal("-415.00"))
+
+
+def test_usd_income_with_only_sell_refuses():
+    with pytest.raises(BuildRefused) as refused:
+        arithmetic([_fx_entry(id="i", direction="income", amount="10.00")], _inp(fx_rate(5, "41.6000", "sell")))
+    assert "no official USD rate for 1 income row(s)" in refused.value.reason
+    assert refused.value.transaction_id == "i"
