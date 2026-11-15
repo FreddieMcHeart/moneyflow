@@ -1,7 +1,9 @@
 """A fake Metabase on http.server holds state in memory. No real Metabase, synthetic values only."""
 
 import json
+import re
 import threading
+import uuid
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pytest
@@ -16,6 +18,36 @@ DEFS = [
     {"name": "Dash B", "cards": [
         {"name": "c3", "sql": "select 3", "display": "table", "visualization_settings": {}, "row": 0, "col": 0, "size_x": 12, "size_y": 4}]},
 ]
+
+
+BASE_TYPES = {"Category": "type/Text", "Subcategory": "type/Text", "Currency": "type/Text",
+              "Plan": "type/Decimal", "Actual": "type/Decimal", "Transactions": "type/BigInteger"}
+
+
+def _stored_sql(card):
+    """The SQL string of a stored native card, in either stored shape; None for a query card."""
+    query = card.get("dataset_query") or {}
+    if "stages" in query:
+        return query["stages"][0].get("native")
+    return (query.get("native") or {}).get("query")
+
+
+def _metadata_for(card):
+    """A fake rule: one result column per double-quoted SELECT alias (`as "Plan"`), base type by name."""
+    return [{"name": name, "base_type": BASE_TYPES.get(name, "type/Text")} for name in re.findall(r'as "(\w+)"', _stored_sql(card) or "")]
+
+
+def _stages_query(dataset_query, source_id):
+    """The v0.65 stored shape of a query-builder card (T5 step 1 (a)): no top-level type, field name LAST, random uuids."""
+    def field(ref):
+        name, options = ref[1], ref[2]
+        return ["field", {"base-type": options["base-type"], "lib/uuid": str(uuid.uuid4())}, name]
+
+    query = dataset_query["query"]
+    stage = {"lib/type": "mbql.stage/mbql", "source-card": source_id,
+             "breakout": [field(ref) for ref in query["breakout"]],
+             "aggregation": [[op, {"lib/uuid": str(uuid.uuid4())}, field(ref)] for op, ref in query["aggregation"]]}
+    return {"lib/type": "mbql/query", "database": dataset_query["database"], "stages": [stage]}
 
 
 class FakeMetabase:
@@ -56,6 +88,9 @@ class FakeMetabase:
         self._next += 1
         return self._next
 
+    def metadata(self, card):
+        return _metadata_for(card)
+
     def route(self, method, path, body):
         if path == "/api/session/properties":
             return {"setup-token": None if self.setup_done else "tok"}, 200
@@ -87,6 +122,11 @@ class FakeMetabase:
             return self.cards[-1], 200
         if path == "/api/card":
             return [c for c in self.cards if not c.get("archived")], 200
+        if path.startswith("/api/card/") and path.endswith("/query") and method == "POST":
+            return {"data": {"rows": []}}, 200
+        if path.startswith("/api/card/") and method == "GET":
+            card = next(c for c in self.cards if c["id"] == int(path.rsplit("/", 1)[1]))
+            return {**card, "result_metadata": self.metadata(card)}, 200
         if path.startswith("/api/card/") and method == "PUT":
             card = next(c for c in self.cards if c["id"] == int(path.rsplit("/", 1)[1]))
             card.update(body)
@@ -221,6 +261,8 @@ def test_every_dashboard_card_variable_has_a_template_tag():
     seen = 0
     for definition in load_definitions(directory):
         for card in definition["cards"]:
+            if "sql" not in card:
+                continue
             body = _card_body(card, 1, 2, definition.get("parameters"))
             tags = body["dataset_query"]["native"].get("template-tags", {})
             for var in re.findall(r"\{\{\s*(\w+)\s*\}\}", card["sql"]):
@@ -247,10 +289,14 @@ class EchoingMetabase(FakeMetabase):
             body["entity_id"] = "ent-" + body["name"]
             body["archived"] = False
             body["visualization_settings"] = {**body["visualization_settings"], "table.cell_column": "x"}
-            native = body["dataset_query"]["native"]
-            native["template-tags"] = {
-                k: {**t, "id": "server-" + k, "display-name": t["display-name"].lower(), "required": False}
-                for k, t in native.get("template-tags", {}).items()}
+            if body["dataset_query"]["type"] == "query":
+                source_id = int(body["dataset_query"]["query"]["source-table"].removeprefix("card__"))
+                body["dataset_query"] = _stages_query(body["dataset_query"], source_id)
+            else:
+                native = body["dataset_query"]["native"]
+                native["template-tags"] = {
+                    k: {**t, "id": "server-" + k, "display-name": t["display-name"].lower(), "required": False}
+                    for k, t in native.get("template-tags", {}).items()}
         return super().route(method, path, body)
 
 
@@ -275,13 +321,17 @@ class V065Metabase(FakeMetabase):
     def route(self, method, path, body):
         result, code = super().route(method, path, body)
         if path.startswith("/api/card") and method in ("POST", "PUT") and "dataset_query" in body:
-            native = body["dataset_query"]["native"]
-            stage = {"lib/type": "mbql.stage/native", "native": native["query"]}
-            if native.get("template-tags"):
-                stage["template-tags"] = [{"id": "server-" + k, "name": k, "display-name": k, "type": t["type"]}
-                                          for k, t in native["template-tags"].items()]
             card = next(c for c in self.cards if c["id"] == result["id"])
-            card["dataset_query"] = {"lib/type": "mbql/query", "database": body["dataset_query"]["database"], "stages": [stage]}
+            if body["dataset_query"]["type"] == "query":
+                source_id = int(body["dataset_query"]["query"]["source-table"].removeprefix("card__"))
+                card["dataset_query"] = _stages_query(body["dataset_query"], source_id)
+            else:
+                native = body["dataset_query"]["native"]
+                stage = {"lib/type": "mbql.stage/native", "native": native["query"]}
+                if native.get("template-tags"):
+                    stage["template-tags"] = [{"id": "server-" + k, "name": k, "display-name": k, "type": t["type"]}
+                                              for k, t in native["template-tags"].items()]
+                card["dataset_query"] = {"lib/type": "mbql/query", "database": body["dataset_query"]["database"], "stages": [stage]}
         if path.startswith("/api/dashboard/") and method == "PUT":
             # checkpoint 1 on v0.65.3: parameters and mappings come back as sent, plus keys the server adds
             result["parameters"] = [{**p, "sectionId": "string"} for p in result["parameters"]]
@@ -508,3 +558,306 @@ def test_v065_second_provision_reports_zero_updated_and_archived():
         assert (second.updated, second.archived, len(fake.writes())) == (0, 0, before)
     finally:
         fake.server.shutdown()
+
+
+# ---- T5: pivot cards (fabricated names and values only) ----
+
+ROWS_SQL = ('select \'a\' as "Category", \'b\' as "Subcategory", \'UAH\' as "Currency", 1 as "Plan", 2 as "Actual", 3 as "Transactions"')
+SPLIT_KEYS = ('["name","sum"]', '["name","sum_2"]', '["name","sum_3"]')
+PIVOT_SETTINGS = {
+    "pivot.show_row_totals": False,
+    "column_settings": {
+        SPLIT_KEYS[0]: {"column_title": "Plan", "number_style": "decimal", "decimals": 2},
+        SPLIT_KEYS[1]: {"column_title": "Actual", "number_style": "decimal", "decimals": 2},
+        SPLIT_KEYS[2]: {"column_title": "Transactions"},
+    },
+}
+PIVOT = {"source": "rows card", "rows": ["Category", "Subcategory"], "columns": ["Currency"], "values": ["Plan", "Actual", "Transactions"]}
+PIVOT_DEFS = [{"name": "Dash P", "parameters": [], "cards": [
+    {"name": "rows card", "sql": ROWS_SQL, "display": "table", "visualization_settings": {}, "on_dashboard": False},
+    {"name": "pivot card", "pivot": PIVOT, "display": "pivot", "visualization_settings": PIVOT_SETTINGS,
+     "row": 0, "col": 0, "size_x": 24, "size_y": 8},
+    {"name": "plain", "sql": "select 1", "display": "table", "visualization_settings": {}, "row": 8, "col": 0, "size_x": 24, "size_y": 6}]}]
+METADATA = [{"name": n, "base_type": t} for n, t in
+            (("Category", "type/Text"), ("Subcategory", "type/Text"), ("Currency", "type/Text"),
+             ("Plan", "type/Float"), ("Actual", "type/Decimal"), ("Transactions", "type/BigInteger"))]
+
+
+def _pivot_defs(**changes):
+    defs = json.loads(json.dumps(PIVOT_DEFS))
+    defs[0]["cards"][1]["pivot"].update(changes)
+    return defs
+
+
+def _pivot_card(fake, name="pivot card"):
+    return next(c for c in fake.cards if c["name"] == name)
+
+
+def _write_pivot_definition(tmp_path, cards, parameters=()):
+    (tmp_path / "d.json").write_text(json.dumps({"name": "D", "parameters": list(parameters), "cards": cards}))
+    return tmp_path
+
+
+def _sql_card(name="rows card", sql=ROWS_SQL, **extra):
+    return {"name": name, "sql": sql, "display": "table", "row": 0, "col": 0, "size_x": 1, "size_y": 1, **extra}
+
+
+def _pivot_json_card(name="pivot card", **extra):
+    return {"name": name, "pivot": dict(PIVOT), "display": "pivot", "row": 0, "col": 0, "size_x": 1, "size_y": 1,
+            "visualization_settings": {}, **extra}
+
+
+@pytest.mark.parametrize("cards, needle", [
+    ([{**_sql_card(), "pivot": PIVOT}], "exactly one of sql or pivot"),
+    ([{k: v for k, v in _pivot_json_card().items() if k != "pivot"}], "exactly one of sql or pivot"),
+    ([_pivot_json_card()], "pivot source"),                                   # no earlier sql card of that name
+    ([_pivot_json_card(), _sql_card()], "pivot source"),                      # the source comes later in the file
+    ([_sql_card(), _pivot_json_card(visualization_settings={"pivot_table.column_split": {"rows": []}})], "column_split"),
+], ids=["both", "neither", "unknown-source", "later-source", "column-split-written"])
+def test_load_definitions_refuses_a_bad_pivot_card(tmp_path, cards, needle):
+    from tools.metabase.api import load_definitions
+
+    with pytest.raises(ValueError) as caught:
+        load_definitions(_write_pivot_definition(tmp_path, cards))
+    assert "d.json" in str(caught.value) and needle in str(caught.value)
+
+
+def test_load_definitions_refuses_a_pivot_on_a_dashboard_with_parameters(tmp_path):
+    from tools.metabase.api import load_definitions
+
+    cards = [_sql_card(sql=ROWS_SQL + " [[where 1 = {{a_var}}]]"), _pivot_json_card()]
+    with pytest.raises(ValueError) as caught:
+        load_definitions(_write_pivot_definition(tmp_path, cards, [{"name": "a_var", "type": "text"}]))
+    assert "pivot on a dashboard with parameters" in str(caught.value)
+
+
+def test_load_definitions_accepts_a_pivot_after_its_sql_source_and_off_dashboard_cards(tmp_path):
+    from tools.metabase.api import load_definitions
+
+    cards = [{"name": "rows card", "sql": ROWS_SQL, "display": "table", "on_dashboard": False}, _pivot_json_card()]
+    assert len(load_definitions(_write_pivot_definition(tmp_path, cards))) == 1
+
+
+def test_a_pivot_card_body_is_a_query_over_the_source_card_with_types_from_its_metadata():
+    from tools.metabase.api import _card_body
+
+    body = _card_body(PIVOT_DEFS[0]["cards"][1], 1, 2, None, source=(77, METADATA))
+    assert body["dataset_query"] == {"type": "query", "database": 1, "query": {
+        "source-table": "card__77",
+        "breakout": [["field", "Category", {"base-type": "type/Text"}], ["field", "Subcategory", {"base-type": "type/Text"}],
+                     ["field", "Currency", {"base-type": "type/Text"}]],
+        "aggregation": [["sum", ["field", "Plan", {"base-type": "type/Float"}]],
+                        ["sum", ["field", "Actual", {"base-type": "type/Decimal"}]],
+                        ["sum", ["field", "Transactions", {"base-type": "type/BigInteger"}]]]}}
+    assert (body["name"], body["collection_id"], body["display"]) == ("pivot card", 2, "pivot")
+
+
+def test_the_provisioner_builds_column_split_and_keeps_the_card_settings():
+    from tools.metabase.api import _card_body
+
+    body = _card_body(PIVOT_DEFS[0]["cards"][1], 1, 2, None, source=(77, METADATA))
+    settings = body["visualization_settings"]
+    assert settings["pivot_table.column_split"] == {"rows": ["Category", "Subcategory"], "columns": ["Currency"],
+                                                    "values": ["sum", "sum_2", "sum_3"]}
+    assert settings["pivot.show_row_totals"] is False and settings["column_settings"] == PIVOT_SETTINGS["column_settings"]
+    assert "pivot_table.column_split" not in PIVOT_DEFS[0]["cards"][1]["visualization_settings"]  # the input is not mutated
+
+
+@pytest.mark.parametrize("source, needle", [
+    ((77, []), "no result_metadata"),
+    ((77, None), "no result_metadata"),
+    ((77, [m for m in METADATA if m["name"] != "Actual"]), "Actual"),
+], ids=["empty-metadata", "no-metadata", "missing-name"])
+def test_a_pivot_card_body_without_metadata_or_a_named_column_raises_with_the_card_name(source, needle):
+    from tools.metabase.api import _card_body
+
+    with pytest.raises(ValueError) as caught:
+        _card_body(PIVOT_DEFS[0]["cards"][1], 1, 2, None, source=source)
+    assert "pivot card" in str(caught.value) and needle in str(caught.value)
+
+
+def _wanted():
+    from tools.metabase.api import _card_body
+
+    return _card_body(PIVOT_DEFS[0]["cards"][1], 1, 2, None, source=(77, METADATA))
+
+
+def _stored(wanted, shape):
+    """What the server holds for the wanted card: the legacy shape as sent, or the v0.65 `stages` shape."""
+    query = wanted["dataset_query"] if shape == "legacy" else _stages_query(wanted["dataset_query"], 77)
+    return {"id": 5, "display": wanted["display"], "visualization_settings": {**wanted["visualization_settings"], "extra": 1},
+            "dataset_query": query}
+
+
+@pytest.mark.parametrize("shape", ["legacy", "stages"])
+def test_card_differs_is_false_for_a_stored_pivot_in_either_shape(shape):
+    from tools.metabase.api import _card_differs
+
+    wanted = _wanted()
+    assert not _card_differs(_stored(wanted, shape), wanted)
+
+
+def _mutate(wanted, how):
+    wanted = json.loads(json.dumps(wanted))
+    query = wanted["dataset_query"]["query"]
+    if how == "source":
+        query["source-table"] = "card__78"
+    elif how == "breakout-order":
+        query["breakout"].reverse()
+    elif how == "breakout-name":
+        query["breakout"][0][1] = "Other"
+    elif how == "aggregation-op":
+        query["aggregation"][0][0] = "avg"
+    elif how == "aggregation-field":
+        query["aggregation"][1][1][1] = "Plan"
+    elif how == "display":
+        wanted["display"] = "table"
+    elif how == "setting":
+        wanted["visualization_settings"]["pivot.show_row_totals"] = True
+    return wanted
+
+
+@pytest.mark.parametrize("shape", ["legacy", "stages"])
+@pytest.mark.parametrize("how", ["source", "breakout-order", "breakout-name", "aggregation-op", "aggregation-field", "display", "setting"])
+def test_card_differs_sees_every_change_of_a_pivot_in_either_shape(shape, how):
+    from tools.metabase.api import _card_differs
+
+    wanted = _wanted()
+    assert _card_differs(_stored(wanted, shape), _mutate(wanted, how))
+
+
+def test_a_stored_native_card_differs_from_a_wanted_pivot_and_the_other_way_round():
+    from tools.metabase.api import _card_body, _card_differs
+
+    wanted = _wanted()
+    native = _card_body(PIVOT_DEFS[0]["cards"][0], 1, 2)
+    native_stored = {"display": "table", "visualization_settings": {}, "dataset_query": native["dataset_query"]}
+    assert _card_differs(native_stored, wanted)
+    assert _card_differs(_stored(wanted, "stages"), native)
+
+
+@pytest.fixture(params=[FakeMetabase, V065Metabase, EchoingMetabase], ids=["legacy", "v065", "echoing"])
+def pivot_fake(request):
+    server = request.param()
+    yield server
+    server.server.shutdown()
+
+
+def test_a_pivot_is_created_over_its_source_and_stored_with_the_built_column_split(pivot_fake):
+    counts = provision(Client(pivot_fake.url), ENV, PIVOT_DEFS)
+    assert (counts.created, counts.updated) == (6, 0)  # db, collection, 3 cards, 1 dashboard
+    rows, pivot = _pivot_card(pivot_fake, "rows card"), _pivot_card(pivot_fake)
+    stored = pivot["dataset_query"]
+    if "stages" in stored:
+        assert "type" not in stored and stored["stages"][0]["source-card"] == rows["id"]
+    else:
+        assert stored["query"]["source-table"] == f"card__{rows['id']}"
+    settings = pivot["visualization_settings"]
+    assert settings["pivot_table.column_split"]["columns"] == ["Currency"]
+    assert "Currency" not in settings["pivot_table.column_split"]["rows"]
+    assert settings["pivot.show_row_totals"] is False  # no total crosses currencies
+
+
+def test_an_off_dashboard_card_is_upserted_has_no_dashcard_and_the_ids_count_only_dashboard_cards(pivot_fake):
+    provision(Client(pivot_fake.url), ENV, PIVOT_DEFS)
+    dash = _dash(pivot_fake, "Dash P")
+    ids = {c["name"]: c["id"] for c in pivot_fake.cards}
+    assert [d["card_id"] for d in dash["dashcards"]] == [ids["pivot card"], ids["plain"]]
+    assert [d["id"] for d in dash["dashcards"]] == [-1, -2]
+    assert [(d["row"], d["size_y"]) for d in dash["dashcards"]] == [(0, 8), (8, 6)]
+
+
+def test_an_off_dashboard_card_is_kept_by_the_archive_pass(pivot_fake):
+    provision(Client(pivot_fake.url), ENV, PIVOT_DEFS)
+    counts = provision(Client(pivot_fake.url), ENV, PIVOT_DEFS)
+    assert not _archive_puts(pivot_fake) and counts.archived == 0
+    assert not _pivot_card(pivot_fake, "rows card").get("archived")
+
+
+def test_second_provision_of_a_pivot_dashboard_reports_zero_created_and_zero_updated(pivot_fake):
+    provision(Client(pivot_fake.url), ENV, PIVOT_DEFS)
+    before = len(pivot_fake.writes())
+    counts = provision(Client(pivot_fake.url), ENV, PIVOT_DEFS)
+    assert (counts.created, counts.updated, counts.archived, len(pivot_fake.writes())) == (0, 0, 0, before)
+
+
+def test_a_changed_pivot_value_is_exactly_one_update_of_the_pivot_card(pivot_fake):
+    provision(Client(pivot_fake.url), ENV, PIVOT_DEFS)
+    counts = provision(Client(pivot_fake.url), ENV, _pivot_defs(values=["Actual", "Plan", "Transactions"]))
+    assert [e for e in counts.log if e.endswith("updated")] == ["card pivot card: updated"]
+
+
+def test_a_changed_pivot_setting_is_exactly_one_update_of_the_pivot_card(pivot_fake):
+    provision(Client(pivot_fake.url), ENV, PIVOT_DEFS)
+    changed = json.loads(json.dumps(PIVOT_DEFS))
+    changed[0]["cards"][1]["visualization_settings"]["column_settings"][SPLIT_KEYS[2]]["column_title"] = "Count"
+    counts = provision(Client(pivot_fake.url), ENV, changed)
+    assert [e for e in counts.log if e.endswith("updated")] == ["card pivot card: updated"]
+
+
+def test_a_native_card_is_turned_into_a_pivot_by_one_put():
+    """The live case: the old native `This cycle` is PUT over with the pivot body (T5 step 1 (d))."""
+    fake = V065Metabase()
+    try:
+        old = [{"name": "Dash P", "parameters": [], "cards": [
+            {"name": "pivot card", "sql": ROWS_SQL, "display": "table", "visualization_settings": {}, "row": 0, "col": 0, "size_x": 24, "size_y": 8}]}]
+        provision(Client(fake.url), ENV, old)
+        native_id = _pivot_card(fake)["id"]
+        counts = provision(Client(fake.url), ENV, PIVOT_DEFS)
+        assert "card pivot card: updated" in counts.log and "card rows card: created" in counts.log
+        assert _pivot_card(fake)["id"] == native_id and _pivot_card(fake)["display"] == "pivot"
+        assert "stages" in _pivot_card(fake)["dataset_query"] and "source-card" in _pivot_card(fake)["dataset_query"]["stages"][0]
+    finally:
+        fake.server.shutdown()
+
+
+class StaleMetadataMetabase(FakeMetabase):
+    """result_metadata is frozen at the first read of a card: a later PUT of its SQL does not refresh it."""
+
+    def metadata(self, card):
+        frozen = self.__dict__.setdefault("frozen", {})
+        return frozen.setdefault(card["id"], super().metadata(card))
+
+
+def test_a_source_card_updated_in_this_run_whose_metadata_lacks_a_pivot_name_raises_with_the_card_name():
+    from tools.metabase.api import ApiError  # noqa: F401
+
+    fake = StaleMetadataMetabase()
+    try:
+        provision(Client(fake.url), ENV, PIVOT_DEFS)
+        renamed = json.loads(json.dumps(PIVOT_DEFS))
+        renamed[0]["cards"][0]["sql"] = ROWS_SQL.replace('as "Actual"', 'as "Spent"')
+        renamed[0]["cards"][1]["pivot"]["values"] = ["Plan", "Spent", "Transactions"]
+        with pytest.raises(ValueError) as caught:
+            provision(Client(fake.url), ENV, renamed)
+        assert "pivot card" in str(caught.value) and "Spent" in str(caught.value)
+    finally:
+        fake.server.shutdown()
+
+
+class EmptyUntilRunMetabase(FakeMetabase):
+    """result_metadata is empty until the card has been run once."""
+
+    def route(self, method, path, body):
+        if path.startswith("/api/card/") and path.endswith("/query") and method == "POST":
+            self.__dict__.setdefault("ran", set()).add(int(path.split("/")[3]))
+        return super().route(method, path, body)
+
+    def metadata(self, card):
+        return super().metadata(card) if card["id"] in self.__dict__.get("ran", set()) else []
+
+
+def test_an_empty_result_metadata_makes_provision_run_the_source_once_and_read_again():
+    fake = EmptyUntilRunMetabase()
+    try:
+        provision(Client(fake.url), ENV, PIVOT_DEFS)
+        runs = [p for m, p, _ in fake.requests if m == "POST" and p.endswith("/query")]
+        assert len(runs) == 1 and runs[0] == f"/api/card/{_pivot_card(fake, 'rows card')['id']}/query"
+        assert _pivot_card(fake)["dataset_query"]["query"]["source-table"].startswith("card__")
+    finally:
+        fake.server.shutdown()
+
+
+def test_a_source_with_metadata_is_never_run(fake):
+    provision(Client(fake.url), ENV, PIVOT_DEFS)
+    assert not [p for m, p, _ in fake.requests if m == "POST" and p.endswith("/query")]
