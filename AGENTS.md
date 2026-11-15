@@ -9,7 +9,7 @@ YAGNI, KISS, DRY, AHA, SRP, Fail Fast; reuse ready solutions; no feature, abstra
 ```
 uv sync
 uv run pytest -q     # unit tests
-./check.sh           # all quality gates, also the CI entry point
+./check.sh           # all quality gates; CI runs `fast` and `mutation` as two jobs
 ```
 
 `./check.sh` stops at the first failure. Order: pytest, import contracts (`uv run lint-imports`), CRAP, duplication, mutation testing on `src/moneyflow/core`.

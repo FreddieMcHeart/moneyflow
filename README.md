@@ -96,7 +96,7 @@ uv run pytest -q
 ./check.sh
 ```
 
-`./check.sh` is also what CI runs. It covers tests, import contracts, CRAP, duplication and mutation testing. To set up the test database, see [AGENTS.md](AGENTS.md).
+CI runs the same gates as `./check.sh fast` and `./check.sh mutation`, in two parallel jobs. It covers tests, import contracts, CRAP, duplication and mutation testing. To set up the test database, see [AGENTS.md](AGENTS.md).
 
 ## Contributing
 

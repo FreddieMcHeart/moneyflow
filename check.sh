@@ -1,11 +1,14 @@
 #!/usr/bin/env bash
-# Quality gates, in order. Stops at the first failure. Also the CI entry point.
+# Quality gates, in order. Stops at the first failure. CI runs "fast" and "mutation" as two jobs.
 # ub tools (crapper, dryer, mutator) live outside the repo: UB_TOOLS, default ~/dev/ub-tools.
 set -euo pipefail
 cd "$(dirname "$0")"
 UB="${UB_TOOLS:-$HOME/dev/ub-tools}"
 ROOT="$PWD"
+MODE="${1:-all}"
+case "$MODE" in all|fast|mutation) ;; *) echo "usage: ./check.sh [fast|mutation]" >&2; exit 2;; esac
 
+if [ "$MODE" != mutation ]; then
 echo "== gate 1/5: pytest"
 uv run pytest -q
 
@@ -23,8 +26,13 @@ if grep -q '^DUPLICATE' <<<"$dup_out"; then
     echo "FAIL duplication gate: dryer reported DUPLICATE candidates" >&2
     exit 1
 fi
+fi
 
+if [ "$MODE" != fast ]; then
 echo "== gate 5/5: mutation testing on src/moneyflow/core"
-"$UB/mutator/mutator" --root "$ROOT" src/moneyflow/core
+"$UB/mutator/mutator" --root "$ROOT" \
+    --test-command "$ROOT/.venv/bin/python -m pytest -q tests/core tests/test_core_stdlib_only.py" \
+    src/moneyflow/core
+fi
 
-echo "== all gates passed"
+echo "== gates passed ($MODE)"
