@@ -44,7 +44,7 @@
       "size_y": 8
     },
     {
-      "name": "History by month",
+      "name": "History by month (rows)",
       "sql": "with actual as (select budget_month, category, coalesce(subcategory, '') as subcategory, currency, sum(case when direction in ('expense', 'reimbursement') then -amount end) as actual, count(distinct transaction_id) as n from ledger_entries where status = 'kept' and direction <> 'income' and category is not null and budget_month is not null group by budget_month, category, coalesce(subcategory, ''), currency), plan as (select budget_month, category, coalesce(subcategory, '') as subcategory, currency, sum(amount) as plan from plan_lines group by budget_month, category, coalesce(subcategory, ''), currency), joined as (select coalesce(p.budget_month, a.budget_month) as budget_month, coalesce(p.category, a.category) as category, coalesce(p.subcategory, a.subcategory) as subcategory, coalesce(p.currency, a.currency) as currency, p.plan, a.actual, coalesce(a.n, 0) as n from plan p full outer join actual a on p.budget_month = a.budget_month and p.category = a.category and p.subcategory = a.subcategory and p.currency = a.currency) select budget_month as \"Month\", category as \"Category\", subcategory as \"Subcategory\", currency as \"Currency\", plan as \"Plan\", actual as \"Actual\", n as \"Transactions\" from joined where budget_month not in (select budget_month from month_summaries where cycle_open) order by \"Month\", \"Category\", \"Subcategory\"",
       "display": "table",
       "visualization_settings": {
@@ -57,6 +57,55 @@
             "number_style": "decimal",
             "decimals": 0
           }
+        }
+      },
+      "on_dashboard": false
+    },
+    {
+      "name": "History by month",
+      "pivot": {
+        "source": "History by month (rows)",
+        "rows": [
+          "Month",
+          "Category",
+          "Subcategory"
+        ],
+        "columns": [
+          "Currency"
+        ],
+        "values": [
+          "Plan",
+          "Actual",
+          "Transactions"
+        ]
+      },
+      "display": "pivot",
+      "visualization_settings": {
+        "pivot.show_row_totals": false,
+        "column_settings": {
+          "[\"name\",\"sum\"]": {
+            "column_title": "Plan",
+            "number_style": "decimal",
+            "decimals": 0
+          },
+          "[\"name\",\"sum_2\"]": {
+            "column_title": "Actual",
+            "number_style": "decimal",
+            "decimals": 0
+          },
+          "[\"name\",\"sum_3\"]": {
+            "column_title": "Transactions"
+          }
+        },
+        "pivot_table.collapsed_rows": {
+          "value": [
+            "1"
+          ],
+          "rows": [
+            "Month",
+            "Category",
+            "Subcategory"
+          ]
         }
       },
       "row": 8,

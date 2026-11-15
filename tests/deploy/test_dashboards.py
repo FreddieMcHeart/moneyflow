@@ -16,7 +16,7 @@ DIR = Path(__file__).resolve().parents[2] / "deploy" / "metabase" / "dashboards"
 FILES = sorted(DIR.glob("*.json"))
 LAYOUT_KEYS = {"row", "col", "size_x", "size_y"}
 CARD_KEYS = {"sql": {"name", "sql", "display", "visualization_settings"},
-             "pivot": {"name", "pivot", "display", "visualization_settings"}}  # plus LAYOUT_KEYS on a dashboard; on_dashboard optional
+             "pivot": {"name", "pivot", "display", "visualization_settings"}}  # plus LAYOUT_KEYS on a dashboard; on_dashboard, filters optional
 FORBIDDEN = re.compile(r"\b(insert|update|delete|create|drop|alter)\b", re.IGNORECASE)
 OPTIONAL = re.compile(r"\[\[.*?\]\]", re.DOTALL)  # Metabase drops an optional clause whose variable is unset
 
@@ -49,7 +49,10 @@ def test_format(path):
         kinds = [k for k in CARD_KEYS if k in card]
         assert len(kinds) == 1, card["name"]  # exactly one of sql or pivot
         expected = CARD_KEYS[kinds[0]] | (LAYOUT_KEYS if _on_dashboard(card) else {"on_dashboard"})
-        assert set(card) - {"on_dashboard"} == expected - {"on_dashboard"} and ("on_dashboard" not in card or card["on_dashboard"] is False)
+        optional = {"on_dashboard", "filters"} if kinds[0] == "pivot" else {"on_dashboard"}
+        assert set(card) - optional == expected - {"on_dashboard"} and ("on_dashboard" not in card or card["on_dashboard"] is False)
+        if "filters" in card:
+            assert card["filters"] and all(isinstance(k, str) and isinstance(v, str) for k, v in card["filters"].items())
         assert all(isinstance(card[k], str) and card[k] for k in ("name", "display"))
         assert isinstance(card["visualization_settings"], dict)
         if _on_dashboard(card):
@@ -154,10 +157,10 @@ CONTRACT = [
     ("this-cycle.json", "Where the money went", ["Category", "Actual"], {"Actual": UAH}),
     ("months.json", "Overview", ["Month", "Income ₴", "Total plan ₴", "Spent ₴", "Balance ₴", "Days left", "Cycle open"],
      {"Income ₴": UAH, "Total plan ₴": UAH, "Spent ₴": UAH, "Balance ₴": UAH}),
-    ("months.json", "History by month",
+    ("months.json", "History by month (rows)",
      ["Month", "Category", "Subcategory", "Currency", "Plan", "Actual", "Transactions"], {"Plan": DEC, "Actual": DEC}),
-    ("transactions.json", "Transactions",
-     ["Date", "Description", "Amount", "Currency", "Account", "Category", "Subcategory", "Status"], {"Amount": DEC}),
+    ("transactions.json", "Transactions (rows)",
+     ["Date", "Month", "Description", "Amount", "Currency", "Account", "Category", "Subcategory", "Count"], {"Amount": DEC}),
     ("transactions.json", "To review",
      ["Date", "Description", "Amount", "Currency", "Account", "MCC", "Category", "Subcategory"], {"Amount": DEC}),
 ]
@@ -190,7 +193,7 @@ def test_display_and_layout():
             if not _on_dashboard(card):
                 assert card["display"] == "table" and not LAYOUT_KEYS & set(card), card["name"]
                 continue
-            display = {"Where the money went": "pie", "By category": "pivot", "Plan vs Actual": "row"}.get(card["name"], "table")
+            display = {"Where the money went": "pie", "Plan vs Actual": "row"}.get(card["name"], "pivot" if "pivot" in card else "table")
             size_y = {"Plan vs Actual": 10, "By category": 8, "Where the money went": 6}.get(card["name"], 8)
             assert card["display"] == display, card["name"]
             assert (card["row"], card["col"], card["size_x"], card["size_y"]) == (row, 0, 24, size_y), card["name"]
@@ -261,7 +264,7 @@ def test_this_cycle_rows_are_the_union_of_plan_and_spending(conn):
     assert got[("fun", "", "UAH")]["Actual"] == Decimal("10.00")
 
 
-@pytest.mark.parametrize(("file", "name"), [("this-cycle.json", "This cycle (rows)"), ("months.json", "History by month")])
+@pytest.mark.parametrize(("file", "name"), [("this-cycle.json", "This cycle (rows)"), ("months.json", "History by month (rows)")])
 def test_plan_with_empty_subcategory_and_spend_with_null_merge_into_one_row(conn, file, name):
     """plan_lines stores '' where ledger_entries stores null; the join must treat them as the same key."""
     _seed(conn)
@@ -296,7 +299,7 @@ def test_where_the_money_went_is_open_cycle_uah_by_category(conn):
 
 def test_history_has_no_open_month(conn):
     _seed(conn)
-    rows = _run(conn, _card("months.json", "History by month")["sql"])
+    rows = _run(conn, _card("months.json", "History by month (rows)")["sql"])
     assert {r["Month"] for r in rows} == {CLOSED}
     closed = {(r["Category"], r["Subcategory"]): r for r in rows}
     assert closed[("food", "")]["Plan"] == Decimal("80.00") and closed[("food", "")]["Actual"] == Decimal("40.00")
@@ -333,9 +336,9 @@ def test_sort_order(conn):
     assert actuals == [Decimal("18.00"), Decimal("15.00"), Decimal("10.00"), None]
     assert [r["Actual"] for r in run("this-cycle.json", "Where the money went")] == [Decimal("18.00"), Decimal("15.00"), Decimal("10.00")]
     assert [r["Month"] for r in run("months.json", "Overview")] == [OPEN, CLOSED]
-    history = [(r["Month"], r["Category"], r["Subcategory"]) for r in run("months.json", "History by month")]
+    history = [(r["Month"], r["Category"], r["Subcategory"]) for r in run("months.json", "History by month (rows)")]
     assert history == sorted(history) and len(history) > 1
-    for name in ("Transactions", "To review"):
+    for name in ("Transactions (rows)", "To review"):
         dates = [r["Date"] for r in run("transactions.json", name)]
         assert dates == sorted(dates, reverse=True) and len(dates) > 1
 
@@ -346,24 +349,6 @@ def test_seed_has_a_kept_income_an_unresolved_expense_and_a_reimbursement(conn):
     assert {"direction": "income", "status": "kept", "category": "salary"} in got
     assert {"direction": "expense", "status": "unresolved", "category": None} in got
     assert {"direction": "reimbursement", "status": "kept", "category": "food"} in got
-
-
-def _bound(sql, month, category):
-    return sql.replace("[[", "").replace("]]", "").replace("{{budget_month}}", f"'{month}'").replace("{{category}}", f"'{category}'")
-
-
-def _transactions_sql():
-    return _card("transactions.json", "Transactions")["sql"]
-
-
-def test_filters_bind_when_set(conn):
-    _seed(conn)
-    sql = _transactions_sql()
-    rows = _run(conn, _bound(sql, CLOSED, "food"))
-    assert [(r["Status"], r["Description"], r["Category"], r["Account"]) for r in rows] == [("kept", "cafe", "food", "acc1")]
-    assert _run(conn, _bound(sql, "1999-01", "food")) == []
-    month_only = sql.replace("[[and le.category = {{category}}]]", "")
-    assert {r["Description"] for r in _run(conn, _bound(month_only, CLOSED, ""))} == {"salary", "cafe", "cinema", "mystery"}
 
 
 def test_broken_column_name_in_a_card_goes_red(conn):
@@ -424,3 +409,100 @@ def test_plan_vs_actual_does_not_show_usd(conn):
     got = _plan_vs_actual(conn)
     assert got == _uah_rows_summed_by_category(conn)
     assert got["rent"] == (Decimal("500.00"), Decimal("0")) and "travel" not in got
+
+
+# ---- T7: History by month and Transactions grouped (fabricated seed only) ----
+
+def _file(name):
+    return json.loads((DIR / name).read_text())
+
+
+def _named(file, name):
+    found = [c for c in _file(file)["cards"] if c["name"] == name]
+    assert len(found) == 1, (file, name)
+    return found[0]
+
+
+def test_months_and_transactions_card_order_and_visibility():
+    assert [(c["name"], _on_dashboard(c)) for c in _file("months.json")["cards"]] == [
+        ("Overview", True), ("History by month (rows)", False), ("History by month", True)]
+    assert [(c["name"], _on_dashboard(c)) for c in _file("transactions.json")["cards"]] == [
+        ("Transactions (rows)", False), ("Transactions by category", True), ("To review", True)]
+
+
+def test_history_by_month_is_a_pivot_collapsed_to_month_with_no_row_totals():
+    card = _named("months.json", "History by month")
+    assert card["pivot"] == {"source": "History by month (rows)", "rows": ["Month", "Category", "Subcategory"],
+                             "columns": ["Currency"], "values": ["Plan", "Actual", "Transactions"]}
+    settings = card["visualization_settings"]
+    assert card["display"] == "pivot" and "filters" not in card
+    assert settings["pivot.show_row_totals"] is False  # no total crosses currencies
+    assert settings["pivot_table.collapsed_rows"] == {"value": ["1"], "rows": ["Month", "Category", "Subcategory"]}
+    assert "pivot_table.column_split" not in settings
+    assert settings["column_settings"] == {
+        '["name","sum"]': {"column_title": "Plan", **DEC},
+        '["name","sum_2"]': {"column_title": "Actual", **DEC},
+        '["name","sum_3"]': {"column_title": "Transactions"},
+    }
+
+
+def test_transactions_by_category_is_a_pivot_with_amount_and_count_and_two_filters():
+    card = _named("transactions.json", "Transactions by category")
+    assert card["pivot"] == {"source": "Transactions (rows)", "rows": ["Category", "Subcategory", "Date", "Description", "Account"],
+                             "columns": ["Currency"], "values": ["Amount", "Count"]}
+    assert card["filters"] == {"budget_month": "Month", "category": "Category"}
+    settings = card["visualization_settings"]
+    assert card["display"] == "pivot" and "pivot_table.column_split" not in settings
+    assert settings["column_settings"] == {'["name","sum"]': {"column_title": "Amount", **DEC},
+                                           '["name","sum_2"]': {"column_title": "Count"}}  # Count has no number format
+    assert settings["pivot.show_row_totals"] is False  # Amount must not be added across currencies
+
+
+def test_no_dashboard_card_carries_a_template_tag():
+    """The filters are pivot field mappings now; a `{{...}}` left in a card would be a dead variable."""
+    assert not [(f, c["name"]) for f, c in _sql_cards() if "{{" in c["sql"] or "[[" in c["sql"]]
+
+
+def test_every_pivot_filter_names_a_declared_parameter_and_a_source_column(conn):
+    _seed(conn)
+    checked = 0
+    for file in FILES:
+        definition = json.loads(file.read_text())
+        declared = {p["name"] for p in definition["parameters"]}
+        sources = {c["name"]: c for c in definition["cards"] if "sql" in c}
+        pivots = [c for c in definition["cards"] if "pivot" in c]
+        for pivot in pivots:
+            columns = _run_cols(conn, sources[pivot["pivot"]["source"]]["sql"])[0]
+            assert set(pivot.get("filters", {})) == declared, pivot["name"]  # every parameter is mapped, none invented
+            for column in pivot.get("filters", {}).values():
+                assert column in columns, (pivot["name"], column)
+                checked += 1
+    assert checked == 2
+
+
+def _transactions_rows(conn):
+    return _run_cols(conn, _card("transactions.json", "Transactions (rows)")["sql"])[1]
+
+
+def test_transactions_rows_hold_kept_rows_only_without_a_limit(conn):
+    _seed(conn)
+    sql = _card("transactions.json", "Transactions (rows)")["sql"]
+    assert "limit" not in sql.lower() and "where le.status = 'kept'" in sql and "status" not in sql.split(" from ")[0].lower()
+    rows = _transactions_rows(conn)
+    kept = conn.execute("select count(*) as n from ledger_entries where status = 'kept'").fetchone()["n"]
+    total = conn.execute("select count(*) as n from ledger_entries").fetchone()["n"]
+    assert len(rows) == kept and kept < total  # the seed holds unresolved rows that must not appear
+    assert "mystery" not in {r["Description"] for r in rows}
+    assert {r["Month"] for r in rows} == {CLOSED, OPEN}
+
+
+def test_transactions_count_column_is_one_per_row_so_a_merged_leaf_counts_its_rows(conn):
+    _seed(conn)
+    rows = _transactions_rows(conn)
+    assert rows and {r["Count"] for r in rows} == {1}
+    by_key = {}
+    for r in rows:  # what the pivot merges: equal row keys and currency; Amount and Count are summed
+        key = (r["Category"], r["Subcategory"], r["Date"], r["Description"], r["Account"], r["Currency"])
+        by_key[key] = (by_key.get(key, (Decimal(0), 0))[0] + r["Amount"], by_key.get(key, (Decimal(0), 0))[1] + r["Count"])
+    assert sum(count for _, count in by_key.values()) == len(rows)
+    assert sum(amount for amount, _ in by_key.values()) == sum(r["Amount"] for r in rows)

@@ -21,7 +21,8 @@ DEFS = [
 
 
 BASE_TYPES = {"Category": "type/Text", "Subcategory": "type/Text", "Currency": "type/Text",
-              "Plan": "type/Decimal", "Actual": "type/Decimal", "Transactions": "type/BigInteger"}
+              "Plan": "type/Decimal", "Actual": "type/Decimal", "Transactions": "type/BigInteger",
+              "Amount": "type/Decimal", "Count": "type/BigInteger"}
 
 
 def _stored_sql(card):
@@ -251,13 +252,16 @@ def test_api_error_truncates_a_long_body(fake, monkeypatch):
     assert len(str(caught.value)) < 500
 
 
-def test_every_dashboard_card_variable_has_a_template_tag():
-    import re
-    from pathlib import Path
+TAGGED_FIXTURE = {"name": "Tagged", "parameters": [{"name": "a_var", "type": "text"}, {"name": "b_var", "type": "number"}], "cards": [
+    {"name": "tagged", "sql": "select 1 [[where a = {{a_var}}]] [[and b = {{b_var}}]]", "display": "table", "visualization_settings": {},
+     "row": 0, "col": 0, "size_x": 1, "size_y": 1},
+    {"name": "also tagged", "sql": "select 2 [[where a = {{a_var}}]]", "display": "table", "visualization_settings": {},
+     "row": 1, "col": 0, "size_x": 1, "size_y": 1}]}
 
+
+def _check_every_variable_has_a_template_tag(directory):
     from tools.metabase.api import _card_body, load_definitions
 
-    directory = Path(__file__).resolve().parents[2] / "deploy" / "metabase" / "dashboards"
     seen = 0
     for definition in load_definitions(directory):
         for card in definition["cards"]:
@@ -269,7 +273,17 @@ def test_every_dashboard_card_variable_has_a_template_tag():
                 seen += 1
                 assert var in tags and tags[var]["name"] == var and tags[var]["type"], (card["name"], var)
             assert set(tags) == set(re.findall(r"\{\{\s*(\w+)\s*\}\}", card["sql"]))
-    assert seen >= 2
+    return seen
+
+
+def test_every_dashboard_card_variable_has_a_template_tag(tmp_path):
+    """The real dashboards have no tagged card after T7 (the filters moved to pivot mappings), so the `seen` guard
+    that proves the loop looked at something points at a fixture with tags."""
+    from pathlib import Path
+
+    _check_every_variable_has_a_template_tag(Path(__file__).resolve().parents[2] / "deploy" / "metabase" / "dashboards")
+    (tmp_path / "tagged.json").write_text(json.dumps(TAGGED_FIXTURE))
+    assert _check_every_variable_has_a_template_tag(tmp_path) >= 3
 
 
 def test_declared_dashboard_parameter_type_is_used_for_the_tag():
@@ -622,13 +636,73 @@ def test_load_definitions_refuses_a_bad_pivot_card(tmp_path, cards, needle):
     assert "d.json" in str(caught.value) and needle in str(caught.value)
 
 
-def test_load_definitions_refuses_a_pivot_on_a_dashboard_with_parameters(tmp_path):
+FILTER_SQL = ('select \'m\' as "Month", \'a\' as "Category", \'UAH\' as "Currency", 1 as "Amount", 1 as "Count"')
+FILTER_PARAMETERS = [{"name": "budget_month", "type": "text"}, {"name": "category", "type": "text"}, {"name": "min_count", "type": "number"}]
+FILTER_MAP = {"budget_month": "Month", "category": "Category", "min_count": "Count"}
+
+
+def _filter_pivot(filters=None, **changes):
+    card = {"name": "grouped", "pivot": {"source": "rows card", "rows": ["Category"], "columns": ["Currency"], "values": ["Amount", "Count"]},
+            "display": "pivot", "row": 0, "col": 0, "size_x": 24, "size_y": 8, "visualization_settings": {}}
+    if filters is not None:
+        card["filters"] = filters
+    return {**card, **changes}
+
+
+def _filter_cards(filters=None):
+    return [{"name": "rows card", "sql": FILTER_SQL, "display": "table", "visualization_settings": {}, "on_dashboard": False},
+            _filter_pivot(FILTER_MAP if filters is None else filters)]
+
+
+def _filter_defs(filters=None, parameters=None):
+    return [{"name": "Dash F", "parameters": FILTER_PARAMETERS if parameters is None else parameters, "cards": _filter_cards(filters)}]
+
+
+def test_load_definitions_refuses_a_pivot_that_does_not_map_every_parameter(tmp_path):
     from tools.metabase.api import load_definitions
 
     cards = [_sql_card(sql=ROWS_SQL + " [[where 1 = {{a_var}}]]"), _pivot_json_card()]
     with pytest.raises(ValueError) as caught:
         load_definitions(_write_pivot_definition(tmp_path, cards, [{"name": "a_var", "type": "text"}]))
-    assert "pivot on a dashboard with parameters" in str(caught.value)
+    assert "a_var" in str(caught.value) and "does not map" in str(caught.value)
+
+
+def test_load_definitions_refuses_a_pivot_that_maps_only_some_parameters(tmp_path):
+    from tools.metabase.api import load_definitions
+
+    cards = _filter_cards({"budget_month": "Month"})
+    with pytest.raises(ValueError) as caught:
+        load_definitions(_write_pivot_definition(tmp_path, cards, FILTER_PARAMETERS))
+    assert "category" in str(caught.value) and "min_count" in str(caught.value) and "does not map" in str(caught.value)
+
+
+def test_load_definitions_counts_a_parameter_as_used_through_a_pivot_filter(tmp_path):
+    """No sql card carries a tag here: the parameters are used only by the pivot's `filters`."""
+    from tools.metabase.api import load_definitions
+
+    assert len(load_definitions(_write_pivot_definition(tmp_path, _filter_cards(), FILTER_PARAMETERS))) == 1
+
+
+@pytest.mark.parametrize("cards, needle", [
+    (_filter_cards({**FILTER_MAP, "no_such_parameter": "Month"}), "no_such_parameter"),           # key is not a declared parameter
+    (_filter_cards({**FILTER_MAP, "category": "Subcategory"}), "Subcategory"),                    # value is not a column of the source
+    ([{**_sql_card(sql=FILTER_SQL), "filters": {"budget_month": "Month"}}], "filters on an sql card"),
+], ids=["unknown-key", "not-a-source-column", "filters-on-sql-card"])
+def test_load_definitions_refuses_bad_pivot_filters(tmp_path, cards, needle):
+    from tools.metabase.api import load_definitions
+
+    with pytest.raises(ValueError) as caught:
+        load_definitions(_write_pivot_definition(tmp_path, cards, FILTER_PARAMETERS))
+    assert "d.json" in str(caught.value) and needle in str(caught.value)
+
+
+def test_a_filter_may_name_a_source_column_that_is_not_a_pivot_breakout(tmp_path):
+    """`Month` is neither a row nor a column of the pivot; step 1 (a) showed the filter works on it."""
+    from tools.metabase.api import load_definitions
+
+    cards = _filter_cards()
+    assert "Month" not in cards[1]["pivot"]["rows"] + cards[1]["pivot"]["columns"]
+    assert len(load_definitions(_write_pivot_definition(tmp_path, cards, FILTER_PARAMETERS))) == 1
 
 
 def test_load_definitions_accepts_a_pivot_after_its_sql_source_and_off_dashboard_cards(tmp_path):
@@ -861,3 +935,74 @@ def test_an_empty_result_metadata_makes_provision_run_the_source_once_and_read_a
 def test_a_source_with_metadata_is_never_run(fake):
     provision(Client(fake.url), ENV, PIVOT_DEFS)
     assert not [p for m, p, _ in fake.requests if m == "POST" and p.endswith("/query")]
+
+
+# ---- T7: dashboard parameters mapped to pivot fields ----
+
+def _filtered_dash(fake):
+    return _dash(fake, "Dash F")
+
+
+def _target(column, base_type):
+    return ["dimension", ["field", column, {"base-type": base_type}]]
+
+
+def test_a_pivot_with_filters_gets_one_field_mapping_per_parameter_with_the_source_base_type(pivot_fake):
+    provision(Client(pivot_fake.url), ENV, _filter_defs())
+    dash = _filtered_dash(pivot_fake)
+    ids = {p["slug"]: p["id"] for p in dash["parameters"]}
+    (dashcard,) = dash["dashcards"]
+    assert dashcard["card_id"] == _pivot_card(pivot_fake, "grouped")["id"]
+    got = {m["parameter_id"]: m["target"] for m in dashcard["parameter_mappings"]}
+    assert len(dashcard["parameter_mappings"]) == 3
+    assert got == {ids["budget_month"]: _target("Month", "type/Text"), ids["category"]: _target("Category", "type/Text"),
+                   ids["min_count"]: _target("Count", "type/BigInteger")}  # the type is the source column's, not a constant
+
+
+def test_a_pivot_card_does_not_get_a_template_tag_mapping(pivot_fake):
+    provision(Client(pivot_fake.url), ENV, _filter_defs())
+    (dashcard,) = _filtered_dash(pivot_fake)["dashcards"]
+    assert [m["target"][0] for m in dashcard["parameter_mappings"]] == ["dimension"] * 3
+
+
+def test_second_provision_of_a_filtered_pivot_dashboard_is_unchanged(pivot_fake):
+    provision(Client(pivot_fake.url), ENV, _filter_defs())
+    assert len(_filtered_dash(pivot_fake)["dashcards"][0]["parameter_mappings"]) == 3  # something is stored to compare
+    before = len(pivot_fake.writes())
+    counts = provision(Client(pivot_fake.url), ENV, _filter_defs())
+    assert (counts.created, counts.updated, counts.archived, len(pivot_fake.writes())) == (0, 0, 0, before)
+    assert "dashboard Dash F: unchanged" in counts.log
+
+
+def test_a_changed_filter_column_is_exactly_one_dashboard_update(pivot_fake):
+    provision(Client(pivot_fake.url), ENV, _filter_defs())
+    counts = provision(Client(pivot_fake.url), ENV, _filter_defs({**FILTER_MAP, "category": "Month"}))
+    assert [e for e in counts.log if e.endswith("updated")] == ["dashboard Dash F: updated"]
+    ids = {p["slug"]: p["id"] for p in _filtered_dash(pivot_fake)["parameters"]}
+    (dashcard,) = _filtered_dash(pivot_fake)["dashcards"]
+    assert {m["parameter_id"]: m["target"] for m in dashcard["parameter_mappings"]}[ids["category"]] == _target("Month", "type/Text")
+
+
+def test_a_missing_stored_field_mapping_is_one_dashboard_update(pivot_fake):
+    provision(Client(pivot_fake.url), ENV, _filter_defs())
+    _filtered_dash(pivot_fake)["dashcards"][0]["parameter_mappings"].pop()
+    counts = provision(Client(pivot_fake.url), ENV, _filter_defs())
+    assert counts.log.count("dashboard Dash F: updated") == 1 and counts.updated == 1
+    assert len(_filtered_dash(pivot_fake)["dashcards"][0]["parameter_mappings"]) == 3
+
+
+def test_a_filter_on_a_column_missing_from_the_source_metadata_raises_with_the_card_name():
+    from tools.metabase.api import _upsert_dashboard, Counts
+
+    fake = FakeMetabase()
+    try:
+        provision(Client(fake.url), ENV, _filter_defs())
+        client = Client(fake.url)
+        client.token = "sess"
+        definition = _filter_defs()[0]
+        collection_id = fake.collections[0]["id"]
+        with pytest.raises(ValueError) as caught:
+            _upsert_dashboard(client, definition, [1, 2], collection_id, {}, Counts(), {"rows card": [{"name": "Month", "base_type": "type/Text"}]})
+        assert "grouped" in str(caught.value) and "Category" in str(caught.value)
+    finally:
+        fake.server.shutdown()
