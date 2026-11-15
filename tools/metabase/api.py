@@ -65,6 +65,7 @@ class Counts:
     created: int = 0
     updated: int = 0
     unchanged: int = 0
+    archived: int = 0
     log: list[str] = field(default_factory=list)
 
     def record(self, kind: str, name: str, result: str) -> None:
@@ -72,7 +73,7 @@ class Counts:
         self.log.append(f"{kind} {name}: {result}")
 
     def line(self) -> str:
-        return f"created {self.created}, updated {self.updated}, unchanged {self.unchanged}"
+        return f"created {self.created}, updated {self.updated}, unchanged {self.unchanged}, archived {self.archived}"
 
 
 def authenticate(client: Client, email: str, password: str) -> None:
@@ -254,6 +255,17 @@ def load_definitions(directory: Path) -> list[dict]:
     return definitions
 
 
+def _archive_stale(client: Client, collection_id: int, card_names: set[str], dashboard_names: set[str], counts: Counts) -> None:
+    """L2: the collection is the provisioner's own, so a card or dashboard no definition names is archived."""
+    for item in _items(client.get(f"/api/collection/{collection_id}/items")):
+        if item["model"] == "card" and item["name"] not in card_names:
+            client.put(f"/api/card/{item['id']}", {"archived": True})
+            counts.record("card", item["name"], "archived")
+        elif item["model"] == "dashboard" and item["name"] not in dashboard_names:
+            client.put(f"/api/dashboard/{item['id']}", {"archived": True})
+            counts.record("dashboard", item["name"], "archived")
+
+
 def provision(client: Client, env: dict[str, str], definitions: list[dict]) -> Counts:
     counts = Counts()
     authenticate(client, env["MB_ADMIN_EMAIL"], env["MB_ADMIN_PASSWORD"])
@@ -264,4 +276,6 @@ def provision(client: Client, env: dict[str, str], definitions: list[dict]) -> C
     for definition in definitions:
         card_ids = [_upsert_card(client, card, database_id, collection_id, cards, counts, definition.get("parameters")) for card in definition["cards"]]
         _upsert_dashboard(client, definition, card_ids, collection_id, dashboards, counts)
+    card_names = {card["name"] for definition in definitions for card in definition["cards"]}
+    _archive_stale(client, collection_id, card_names, {definition["name"] for definition in definitions}, counts)
     return counts

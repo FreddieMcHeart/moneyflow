@@ -74,11 +74,19 @@ class FakeMetabase:
                 self.collections.append({"id": self._id(), **body})
                 return self.collections[-1], 200
             return self.collections, 200
+        if path.startswith("/api/collection/") and path.endswith("/items"):
+            collection_id = int(path.split("/")[3])
+            items = [{"id": c["id"], "name": c["name"], "model": "card"} for c in self.cards
+                     if c.get("collection_id") == collection_id and not c.get("archived")]
+            items += [{"id": d["id"], "name": d["name"], "model": "dashboard"} for d in self.dashboards
+                      if d.get("collection_id") == collection_id and not d.get("archived")]
+            items += [i for i in getattr(self, "other_items", []) if i["collection_id"] == collection_id]
+            return {"data": items}, 200
         if path == "/api/card" and method == "POST":
             self.cards.append({"id": self._id(), **body})
             return self.cards[-1], 200
         if path == "/api/card":
-            return self.cards, 200
+            return [c for c in self.cards if not c.get("archived")], 200
         if path.startswith("/api/card/") and method == "PUT":
             card = next(c for c in self.cards if c["id"] == int(path.rsplit("/", 1)[1]))
             card.update(body)
@@ -87,11 +95,14 @@ class FakeMetabase:
             self.dashboards.append({"id": self._id(), "dashcards": [], "parameters": [], **body})
             return self.dashboards[-1], 200
         if path == "/api/dashboard":
-            return self.dashboards, 200
+            return [d for d in self.dashboards if not d.get("archived")], 200
         if path.startswith("/api/dashboard/"):
             dash = next(d for d in self.dashboards if d["id"] == int(path.rsplit("/", 1)[1]))
             if method == "PUT":
-                dash["dashcards"] = body["dashcards"]  # stored as sent, parameter_mappings included
+                if "dashcards" in body:
+                    dash["dashcards"] = body["dashcards"]  # stored as sent, parameter_mappings included
+                if "archived" in body:
+                    dash["archived"] = body["archived"]
                 if "parameters" in body:
                     dash["parameters"] = body["parameters"]
             return dash, 200
@@ -231,7 +242,7 @@ class EchoingMetabase(FakeMetabase):
     """Stores cards the way the real one does: adds ids and extra keys, rewrites template-tag ids and display names."""
 
     def route(self, method, path, body):
-        if path.startswith("/api/card") and method in ("POST", "PUT") and body:
+        if path.startswith("/api/card") and method in ("POST", "PUT") and body and "dataset_query" in body:
             body = json.loads(json.dumps(body))
             body["entity_id"] = "ent-" + body["name"]
             body["archived"] = False
@@ -263,7 +274,7 @@ class V065Metabase(FakeMetabase):
 
     def route(self, method, path, body):
         result, code = super().route(method, path, body)
-        if path.startswith("/api/card") and method in ("POST", "PUT") and body:
+        if path.startswith("/api/card") and method in ("POST", "PUT") and "dataset_query" in body:
             native = body["dataset_query"]["native"]
             stage = {"lib/type": "mbql.stage/native", "native": native["query"]}
             if native.get("template-tags"):
@@ -327,7 +338,7 @@ def test_run_prints_one_line_per_object_before_the_totals(fake, tmp_path, capsys
     assert out[:2] == ["metabase: database moneyflow: unchanged", f"metabase: collection {COLLECTION_NAME}: unchanged"]
     for line in ("card c1: unchanged", "card c2: unchanged", "card c3: unchanged", "dashboard Dash A: unchanged", "dashboard Dash B: unchanged"):
         assert "metabase: " + line in out
-    assert out[-1] == "metabase: created 0, updated 0, unchanged 7" and len(out) == 8
+    assert out[-1] == "metabase: created 0, updated 0, unchanged 7, archived 0" and len(out) == 8
     assert "secret" not in "".join(out)
 
 
@@ -420,3 +431,80 @@ def test_load_definitions_accepts_a_consistent_setup(tmp_path):
     from tools.metabase.api import load_definitions
 
     assert len(load_definitions(_write_definition(tmp_path, _definition([{"name": "a_var", "type": "text"}])))) == 1
+
+
+def _collection_id(fake):
+    return next(c["id"] for c in fake.collections if c["name"] == COLLECTION_NAME)
+
+
+def _seed_stale(fake, collection_id=None):
+    """A card and a dashboard no definition names, placed in the provisioned collection unless told otherwise."""
+    collection_id = _collection_id(fake) if collection_id is None else collection_id
+    fake.cards.append({"id": fake._id(), "name": "stale card", "collection_id": collection_id})
+    fake.dashboards.append({"id": fake._id(), "name": "stale dash", "collection_id": collection_id, "dashcards": [], "parameters": []})
+
+
+def _archive_puts(fake):
+    return [(m, p) for m, p, body in fake.requests if m == "PUT" and '"archived"' in body]
+
+
+def test_stale_card_and_dashboard_are_archived(fake):
+    provision(Client(fake.url), ENV, DEFS)
+    _seed_stale(fake)
+    before = len(fake.writes())
+    counts = provision(Client(fake.url), ENV, DEFS)
+    assert all(x.get("archived") is True for x in (*fake.cards[-1:], *fake.dashboards[-1:]))
+    assert len(fake.writes()) - before == 2 and len(_archive_puts(fake)) == 2
+    assert counts.archived == 2 and "archived 2" in counts.line()
+    assert "card stale card: archived" in counts.log and "dashboard stale dash: archived" in counts.log
+
+
+def test_second_run_after_archive_writes_nothing(fake):
+    provision(Client(fake.url), ENV, DEFS)
+    _seed_stale(fake)
+    provision(Client(fake.url), ENV, DEFS)
+    before = len(fake.writes())
+    counts = provision(Client(fake.url), ENV, DEFS)
+    assert len(fake.writes()) == before
+    assert counts.archived == 0 and "archived 0" in counts.line()
+
+
+def test_same_name_in_another_collection_is_not_archived(fake):
+    provision(Client(fake.url), ENV, DEFS)
+    other = fake._id()
+    _seed_stale(fake, collection_id=other)
+    before = len(fake.writes())
+    counts = provision(Client(fake.url), ENV, DEFS)
+    assert not any(x.get("archived") for x in (*fake.cards, *fake.dashboards))
+    assert len(fake.writes()) == before and not _archive_puts(fake)
+    assert counts.archived == 0
+
+
+def test_other_models_in_the_collection_are_left_alone(fake):
+    provision(Client(fake.url), ENV, DEFS)
+    cid = _collection_id(fake)
+    fake.other_items = [{"id": fake._id(), "name": m + " item", "model": m, "collection_id": cid}
+                        for m in ("dataset", "metric", "collection")]
+    counts = provision(Client(fake.url), ENV, DEFS)
+    assert not _archive_puts(fake) and counts.archived == 0
+
+
+def test_defined_items_are_never_archived(fake):
+    provision(Client(fake.url), ENV, DEFS)
+    counts = provision(Client(fake.url), ENV, DEFS)
+    assert not _archive_puts(fake) and not any(x.get("archived") for x in (*fake.cards, *fake.dashboards))
+    assert counts.archived == 0 and "archived 0" in counts.line()
+
+
+def test_v065_second_provision_reports_zero_updated_and_archived():
+    fake = V065Metabase()
+    try:
+        provision(Client(fake.url), ENV, DEFS)
+        _seed_stale(fake)
+        first = provision(Client(fake.url), ENV, DEFS)
+        assert first.archived == 2
+        before = len(fake.writes())
+        second = provision(Client(fake.url), ENV, DEFS)
+        assert (second.updated, second.archived, len(fake.writes())) == (0, 0, before)
+    finally:
+        fake.server.shutdown()
