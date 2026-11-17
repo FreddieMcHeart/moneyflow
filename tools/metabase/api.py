@@ -261,15 +261,35 @@ def _on_dashboard(card: dict) -> bool:
     return card.get("on_dashboard", True)
 
 
+def _pivot_mappings(card: dict, card_id: int, parameters: list[dict], metadata: dict[str, list[dict]] | None) -> list[dict]:
+    """One field mapping per parameter the pivot's `filters` names; the base type is the source column's, as Metabase stores it."""
+    filters = card.get("filters") or {}
+    source = card["pivot"]["source"]
+    types = {column["name"]: column["base_type"] for column in (metadata or {}).get(source) or []}
+    mappings = []
+    for p in parameters:
+        column = filters.get(p["slug"])
+        if column is None:
+            continue
+        if column not in types:
+            raise ValueError(f"card {card['name']}: filter {p['slug']} names column {column}, which is not in the result_metadata of {source}")
+        mappings.append({"parameter_id": p["id"], "card_id": card_id,
+                         "target": ["dimension", ["field", column, {"base-type": types[column]}]]})
+    return mappings
+
+
 def _upsert_dashboard(client: Client, definition: dict, card_ids: list[int], collection_id: int,
-                      existing: dict[str, dict], counts: Counts) -> None:
+                      existing: dict[str, dict], counts: Counts, metadata: dict[str, list[dict]] | None = None) -> None:
     parameters = _dashboard_parameters(definition)
     dashcards = []
     on_dashboard = [(card, card_id) for card, card_id in zip(definition["cards"], card_ids) if _on_dashboard(card)]
     for i, (card, card_id) in enumerate(on_dashboard):
-        used = set(TAG_VAR.findall(card.get("sql", "")))
-        mappings = [{"parameter_id": p["id"], "card_id": card_id, "target": ["variable", ["template-tag", p["slug"]]]}
-                    for p in parameters if p["slug"] in used]
+        if "pivot" in card:
+            mappings = _pivot_mappings(card, card_id, parameters, metadata)
+        else:
+            used = set(TAG_VAR.findall(card.get("sql", "")))
+            mappings = [{"parameter_id": p["id"], "card_id": card_id, "target": ["variable", ["template-tag", p["slug"]]]}
+                        for p in parameters if p["slug"] in used]
         dashcards.append({"id": -(i + 1), "card_id": card_id, "row": card["row"], "col": card["col"],
                           "size_x": card["size_x"], "size_y": card["size_y"], "visualization_settings": {},
                           "parameter_mappings": mappings})
@@ -291,20 +311,35 @@ def _upsert_dashboard(client: Client, definition: dict, card_ids: list[int], col
         counts.record("dashboard", definition["name"], "unchanged")
 
 
+SQL_ALIAS = re.compile(r'\bas\s+"([^"]+)"', re.IGNORECASE)
+
+
 def _check_pivot_cards(file: str, definition: dict) -> None:
-    sql_seen: set[str] = set()
+    declared = {p["name"] for p in definition.get("parameters") or []}
+    sql_seen: dict[str, str] = {}
     for card in definition["cards"]:
         if ("sql" in card) == ("pivot" in card):
             raise ValueError(f"{file}: card {card.get('name')} needs exactly one of sql or pivot")
-        if "pivot" in card:
-            if definition.get("parameters"):
-                raise ValueError(f"{file}: card {card['name']} is a pivot on a dashboard with parameters, which is not built")
-            if card["pivot"].get("source") not in sql_seen:
-                raise ValueError(f"{file}: card {card['name']} has a pivot source that is not an earlier sql card in the file")
-            if "pivot_table.column_split" in (card.get("visualization_settings") or {}):
-                raise ValueError(f"{file}: card {card['name']} writes pivot_table.column_split, the provisioner builds it")
-        else:
-            sql_seen.add(card["name"])
+        if "pivot" not in card:
+            if "filters" in card:
+                raise ValueError(f"{file}: card {card['name']} has filters on an sql card, only a pivot maps a parameter to a field")
+            sql_seen[card["name"]] = card["sql"]
+            continue
+        if card["pivot"].get("source") not in sql_seen:
+            raise ValueError(f"{file}: card {card['name']} has a pivot source that is not an earlier sql card in the file")
+        if "pivot_table.column_split" in (card.get("visualization_settings") or {}):
+            raise ValueError(f"{file}: card {card['name']} writes pivot_table.column_split, the provisioner builds it")
+        filters = card.get("filters") or {}
+        for key in filters:
+            if key not in declared:
+                raise ValueError(f"{file}: card {card['name']} filters {key}, which is not a declared parameter")
+        source_columns = set(SQL_ALIAS.findall(sql_seen[card["pivot"]["source"]]))
+        for key, column in filters.items():
+            if column not in source_columns:
+                raise ValueError(f"{file}: card {card['name']} filters {key} to {column}, which is not a column of its source card")
+        unmapped = sorted(declared - set(filters))
+        if unmapped:
+            raise ValueError(f"{file}: card {card['name']} is a pivot on a dashboard with parameters and does not map {', '.join(unmapped)} in filters")
 
 
 def load_definitions(directory: Path) -> list[dict]:
@@ -319,6 +354,7 @@ def load_definitions(directory: Path) -> list[dict]:
                 raise ValueError(f"{path.name}: parameter {name} has unknown type {kind}, use one of {sorted(PARAMETER_TYPES)}")
         _check_pivot_cards(path.name, definition)
         used = {tag for card in definition["cards"] if "sql" in card for tag in TAG_VAR.findall(card["sql"])}
+        used |= {key for card in definition["cards"] if "pivot" in card for key in card.get("filters") or {}}
         for tag in sorted(used - set(declared)):
             raise ValueError(f"{path.name}: a card uses {{{{{tag}}}}} but parameters does not declare it")
         for name in sorted(set(declared) - used):
@@ -363,7 +399,7 @@ def provision(client: Client, env: dict[str, str], definitions: list[dict]) -> C
             ids[card["name"]] = _upsert_card(client, card, database_id, collection_id, cards, counts, definition.get("parameters"), source)
             if card["name"] in sources:  # re-read after the write: a source updated in this run must not hand over stale metadata
                 metadata[card["name"]] = _result_metadata(client, ids[card["name"]])
-        _upsert_dashboard(client, definition, [ids[card["name"]] for card in definition["cards"]], collection_id, dashboards, counts)
+        _upsert_dashboard(client, definition, [ids[card["name"]] for card in definition["cards"]], collection_id, dashboards, counts, metadata)
     card_names = {card["name"] for definition in definitions for card in definition["cards"]}
     _archive_stale(client, collection_id, card_names, {definition["name"] for definition in definitions}, counts)
     return counts

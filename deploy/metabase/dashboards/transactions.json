@@ -12,14 +12,53 @@
   ],
   "cards": [
     {
-      "name": "Transactions",
-      "sql": "select le.date as \"Date\", t.description as \"Description\", le.amount as \"Amount\", le.currency as \"Currency\", a.name as \"Account\", le.category as \"Category\", le.subcategory as \"Subcategory\", le.status as \"Status\" from ledger_entries le left join transactions t on t.id = le.transaction_id left join accounts a on a.id = le.account_id where true [[and le.budget_month = {{budget_month}}]] [[and le.category = {{category}}]] order by \"Date\" desc, le.transaction_id, le.part limit 2000",
+      "name": "Transactions (rows)",
+      "sql": "select le.date as \"Date\", le.budget_month as \"Month\", t.description as \"Description\", le.amount as \"Amount\", le.currency as \"Currency\", a.name as \"Account\", le.category as \"Category\", le.subcategory as \"Subcategory\", 1 as \"Count\" from ledger_entries le left join transactions t on t.id = le.transaction_id left join accounts a on a.id = le.account_id where le.status = 'kept' order by \"Date\" desc, le.transaction_id, le.part",
       "display": "table",
       "visualization_settings": {
         "column_settings": {
           "[\"name\",\"Amount\"]": {
             "number_style": "decimal",
             "decimals": 0
+          }
+        }
+      },
+      "on_dashboard": false
+    },
+    {
+      "name": "Transactions by category",
+      "pivot": {
+        "source": "Transactions (rows)",
+        "rows": [
+          "Category",
+          "Subcategory",
+          "Date",
+          "Description",
+          "Account"
+        ],
+        "columns": [
+          "Currency"
+        ],
+        "values": [
+          "Amount",
+          "Count"
+        ]
+      },
+      "filters": {
+        "budget_month": "Month",
+        "category": "Category"
+      },
+      "display": "pivot",
+      "visualization_settings": {
+        "pivot.show_row_totals": false,
+        "column_settings": {
+          "[\"name\",\"sum\"]": {
+            "column_title": "Amount",
+            "number_style": "decimal",
+            "decimals": 0
+          },
+          "[\"name\",\"sum_2\"]": {
+            "column_title": "Count"
           }
         }
       },
