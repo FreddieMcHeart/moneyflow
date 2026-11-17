@@ -10,7 +10,7 @@ import pytest
 from moneyflow.core.model import PlanLine
 from moneyflow.services.rebuild import rebuild
 from moneyflow.storage import db
-from tests.core._builders import TODAY, account, attribute_ruling, owner, reimbursement_ruling, rule, tx
+from tests.core._builders import TODAY, account, attribute_ruling, fx_rate, owner, reimbursement_ruling, rule, tx
 
 DIR = Path(__file__).resolve().parents[2] / "deploy" / "metabase" / "dashboards"
 FILES = sorted(DIR.glob("*.json"))
@@ -84,11 +84,11 @@ def _plan(month, category, amount, subcategory="", currency="UAH"):
 OPEN, CLOSED = "2026-02", "2026-01"
 
 
-def _seed(conn, extra_plan=()):
+def _seed(conn, extra_plan=(), usd_income=False):
     db.replace_imported(
         conn,
         owners=(owner(),),
-        accounts=(account(), account("pay", role="income")),
+        accounts=(account(), account("pay", role="income"), account("usd", "USD", role="income")),
         transactions=(
             tx("inc", account_id="pay", amount="1000.00", direction="income", description="salary", day=1),
             tx("t1", amount="40.00", description="cafe", day=2),
@@ -100,6 +100,8 @@ def _seed(conn, extra_plan=()):
             tx("t6", amount="15.00", description="taxi", day=23),
             tx("t7", amount="5.00", description="mystery", day=24),
             tx("rb", amount="12.00", direction="income", description="refund", day=25),
+            *(tx("usd1", account_id="usd", amount="10.00", currency="USD", direction="income", description="salary", day=26),)
+            * usd_income,
         ),
         rules=(
             rule("r1", 10, 0, "food", None, description_contains="cafe"),
@@ -107,8 +109,9 @@ def _seed(conn, extra_plan=()):
             rule("r3", 10, 2, "salary", None, description_contains="salary"),
             rule("r4", 10, 3, "transport", None, description_contains="taxi"),
         ),
-        rulings=(attribute_ruling("inc", CLOSED), attribute_ruling("inc2", OPEN), reimbursement_ruling("rb", "food")),
-        categories=("food", "fun", "salary", "transport", "rent"), people=(), fx_rates=(),
+        rulings=(attribute_ruling("inc", CLOSED), attribute_ruling("inc2", OPEN), reimbursement_ruling("rb", "food"),
+                 *((attribute_ruling("usd1", OPEN),) * usd_income)),
+        categories=("food", "fun", "salary", "transport", "rent"), people=(), fx_rates=(fx_rate(26, "41.6000", "sell"), fx_rate(26, "41.3000", "official")) if usd_income else (),
         plan_lines=(
             _plan(CLOSED, "food", "80.00"), _plan(CLOSED, "fun", "30.00"),
             _plan(OPEN, "food", "100.00"), _plan(OPEN, "fun", "50.00"), _plan(OPEN, "rent", "500.00"), *extra_plan,
@@ -323,6 +326,14 @@ def test_overview_balance_is_income_minus_spent_and_total_plan_is_summed_plan(co
     assert rows[OPEN]["Total plan ₴"] == Decimal("650.00") and rows[CLOSED]["Total plan ₴"] == Decimal("110.00")
     assert rows[OPEN]["Cycle open"] is True and rows[CLOSED]["Cycle open"] is False
     assert rows[OPEN]["Income ₴"] == Decimal("2000.0")
+
+
+def test_overview_income_counts_usd_income_at_the_official_rate(conn):
+    _seed(conn, usd_income=True)
+    rows = {r["Month"]: r for r in _run(conn, _card("months.json", "Overview")["sql"])}
+    assert set(rows) == {CLOSED, OPEN}
+    assert rows[OPEN]["Income ₴"] == Decimal("2410.0")  # 2000.0 UAH + 10.00 USD at 41.30 floored to 5 = 410.00
+    assert rows[OPEN]["Balance ₴"] == rows[OPEN]["Income ₴"] - rows[OPEN]["Spent ₴"]
 
 
 def _sorted_by(rows, key, reverse=False):

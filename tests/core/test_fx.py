@@ -41,3 +41,22 @@ def test_to_uah_keeps_an_exact_multiple():
 
 def test_to_uah_floors_toward_minus_infinity():
     assert to_uah(Decimal("-1009.00"), Decimal("41.4500"), Decimal("5")) == Decimal("-41825.00")
+
+
+def test_official_rate_for_ignores_sell_on_the_same_day():
+    from moneyflow.core.fx import official_rate_for
+
+    rates = (fx_rate(5, "41.6000", "sell"), fx_rate(5, "41.3000", "official"))
+    assert official_rate_for(DAY, rates) == (Decimal("41.3000"), "official")
+
+
+def test_official_rate_for_none_when_only_sell():
+    from moneyflow.core.fx import official_rate_for
+
+    assert official_rate_for(DAY, (fx_rate(5, "41.6000", "sell"),)) is None
+
+
+def test_official_rate_for_neighbouring_day_not_used():
+    from moneyflow.core.fx import official_rate_for
+
+    assert official_rate_for(DAY, (fx_rate(4, "41.3000", "official"),)) is None
