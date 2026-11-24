@@ -315,14 +315,14 @@ def _plan_ahead(conn):
     return _run(conn, _card("months.json", "Plan ahead")["sql"])
 
 
-def test_plan_ahead_holds_only_months_after_the_open_cycle_summed_per_key(conn):
-    _seed(conn, extra_plan=(_plan(FUTURE, "food", "5.00"), _plan(FUTURE, "rent", "20.00", currency="USD"),
+def test_plan_ahead_holds_only_months_after_the_open_cycle_one_row_per_key(conn):
+    _seed(conn, extra_plan=(_plan(FUTURE, "food", "5.00", subcategory="cafe"), _plan(FUTURE, "rent", "20.00", currency="USD"),
                             _plan(FUTURE, "fun", "7.00", subcategory="games")))
     rows = _plan_ahead(conn)
     assert {r["Month"] for r in rows} == {FUTURE}
     got = {(r["Category"], r["Subcategory"], r["Currency"]): r["Plan"] for r in rows}
-    # the two seeded food lines share one key and are summed; USD stays apart from UAH
-    assert got == {("food", "", "UAH"): Decimal("125.00"), ("rent", "", "USD"): Decimal("20.00"),
+    # one row per (category, subcategory, currency); USD stays apart from UAH
+    assert got == {("food", "", "UAH"): Decimal("120.00"), ("food", "cafe", "UAH"): Decimal("5.00"), ("rent", "", "USD"): Decimal("20.00"),
                    ("fun", "games", "UAH"): Decimal("7.00")}
 
 
