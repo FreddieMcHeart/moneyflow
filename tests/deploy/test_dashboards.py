@@ -82,9 +82,10 @@ def _plan(month, category, amount, subcategory="", currency="UAH"):
 
 # Closed cycle 2026-01 (income "inc", day 1) and open cycle 2026-02 (income "inc2", day 20, attributed forward).
 OPEN, CLOSED = "2026-02", "2026-01"
+FUTURE = "2026-03"  # the month after the open cycle: plan lines only
 
 
-def _seed(conn, extra_plan=(), usd_income=False):
+def _seed(conn, extra_plan=(), usd_income=False, future=True):
     db.replace_imported(
         conn,
         owners=(owner(),),
@@ -114,7 +115,7 @@ def _seed(conn, extra_plan=(), usd_income=False):
         categories=("food", "fun", "salary", "transport", "rent"), people=(), fx_rates=(fx_rate(26, "41.6000", "sell"), fx_rate(26, "41.3000", "official")) if usd_income else (),
         plan_lines=(
             _plan(CLOSED, "food", "80.00"), _plan(CLOSED, "fun", "30.00"),
-            _plan(OPEN, "food", "100.00"), _plan(OPEN, "fun", "50.00"), _plan(OPEN, "rent", "500.00"), *extra_plan,
+            _plan(OPEN, "food", "100.00"), _plan(OPEN, "fun", "50.00"), _plan(OPEN, "rent", "500.00"), *((_plan(FUTURE, "food", "120.00"),) * future), *extra_plan,
         ))
     rebuild(conn, today=TODAY)
 
@@ -162,6 +163,7 @@ CONTRACT = [
      {"Income ₴": UAH, "Total plan ₴": UAH, "Spent ₴": UAH, "Balance ₴": UAH}),
     ("months.json", "History by month (rows)",
      ["Month", "Category", "Subcategory", "Currency", "Plan", "Actual", "Transactions"], {"Plan": DEC, "Actual": DEC}),
+    ("months.json", "Plan ahead", ["Month", "Category", "Subcategory", "Currency", "Plan"], {"Plan": DEC}),
     ("transactions.json", "Transactions (rows)",
      ["Date", "Month", "Description", "Amount", "Currency", "Account", "Category", "Subcategory", "Count"], {"Amount": DEC}),
     ("transactions.json", "To review",
@@ -304,8 +306,36 @@ def test_history_has_no_open_month(conn):
     _seed(conn)
     rows = _run(conn, _card("months.json", "History by month (rows)")["sql"])
     assert {r["Month"] for r in rows} == {CLOSED}
+    assert FUTURE not in {r["Month"] for r in rows}
     closed = {(r["Category"], r["Subcategory"]): r for r in rows}
     assert closed[("food", "")]["Plan"] == Decimal("80.00") and closed[("food", "")]["Actual"] == Decimal("40.00")
+
+
+def _plan_ahead(conn):
+    return _run(conn, _card("months.json", "Plan ahead")["sql"])
+
+
+def test_plan_ahead_holds_only_months_after_the_open_cycle_summed_per_key(conn):
+    _seed(conn, extra_plan=(_plan(FUTURE, "food", "5.00"), _plan(FUTURE, "rent", "20.00", currency="USD"),
+                            _plan(FUTURE, "fun", "7.00", subcategory="games")))
+    rows = _plan_ahead(conn)
+    assert {r["Month"] for r in rows} == {FUTURE}
+    got = {(r["Category"], r["Subcategory"], r["Currency"]): r["Plan"] for r in rows}
+    # the two seeded food lines share one key and are summed; USD stays apart from UAH
+    assert got == {("food", "", "UAH"): Decimal("125.00"), ("rent", "", "USD"): Decimal("20.00"),
+                   ("fun", "games", "UAH"): Decimal("7.00")}
+
+
+def test_history_and_plan_ahead_month_sets_are_disjoint(conn):
+    _seed(conn)
+    history = {r["Month"] for r in _run(conn, _card("months.json", "History by month (rows)")["sql"])}
+    ahead = {r["Month"] for r in _plan_ahead(conn)}
+    assert history == {CLOSED} and ahead == {FUTURE} and not history & ahead
+
+
+def test_plan_ahead_is_empty_when_no_plan_month_follows_the_open_cycle(conn):
+    _seed(conn, future=False)
+    assert _plan_ahead(conn) == []
 
 
 def test_to_review_rows_are_all_unresolved(conn):
@@ -436,7 +466,8 @@ def _named(file, name):
 
 def test_months_and_transactions_card_order_and_visibility():
     assert [(c["name"], _on_dashboard(c)) for c in _file("months.json")["cards"]] == [
-        ("Overview", True), ("History by month (rows)", False), ("History by month", True)]
+        ("Overview", True), ("History by month (rows)", False), ("History by month", True),
+        ("Plan ahead", True)]
     assert [(c["name"], _on_dashboard(c)) for c in _file("transactions.json")["cards"]] == [
         ("Transactions (rows)", False), ("Transactions by category", True), ("To review", True)]
 
